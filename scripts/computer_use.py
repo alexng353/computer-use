@@ -14,6 +14,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import ocr_targets
+
 ROOT = Path.home() / ".local/state/computer-use"
 
 
@@ -336,6 +338,7 @@ def parser():
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="action", required=True)
     commands.add_parser("list", help="List owned sessions")
+    commands.add_parser("setup-ocr", help="Install and warm the local CPU OCR runtime")
     for action in [
         "start",
         "status",
@@ -345,6 +348,8 @@ def parser():
         "exec",
         "input",
         "screenshot",
+        "click",
+        "query",
         "windows",
         "clipboard",
     ]:
@@ -364,6 +369,13 @@ def parser():
                 sub.add_argument("--url", default="about:blank")
         elif action == "screenshot":
             sub.add_argument("--output", type=Path, required=True)
+            sub.add_argument(
+                "--raw", action="store_true", help="Capture without OCR targets"
+            )
+        elif action in ["click", "query"]:
+            sub.add_argument(
+                "reference", help="Current screenshot reference, e.g. @a13"
+            )
         elif action == "clipboard":
             sub.add_argument("operation", choices=["get", "set"])
     return cli
@@ -382,6 +394,11 @@ def main():
         cli.error(
             "launch, exec and input require a command after --; other actions do not"
         )
+    if args.action == "setup-ocr":
+        require("uv")
+        ocr_targets.setup()
+        print("Local CPU OCR runtime ready")
+        return
     if args.action == "list":
         print(
             json.dumps(
@@ -401,11 +418,28 @@ def main():
         print(json.dumps(status(state), indent=2))
         return
     if args.action == "stop":
-        stop(state)
+        with ocr_targets.interaction_lock(state):
+            stop(load(args.name))
         print("Stopped session and removed its temporary files and login profiles")
         return
-    check_session(state)
+    with ocr_targets.interaction_lock(state):
+        # Other commands may have updated service ownership while we waited.
+        state = load(args.name)
+        check_session(state)
+        perform(state, args, command)
+
+
+def perform(state, args, command):
     env = dict(os.environ, **environment(state))
+
+    def capture(output):
+        require("magick")
+        run("magick", "import", "-window", "root", str(output), env=env)
+
+    if args.action in ["launch", "browser", "exec", "input"] or (
+        args.action == "clipboard" and args.operation == "set"
+    ):
+        ocr_targets.invalidate(state)
     if args.action == "launch":
         print(json.dumps(launch(state, args.id, command), indent=2))
     elif args.action == "browser":
@@ -415,11 +449,41 @@ def main():
             command = ["xdotool", *command]
         raise SystemExit(subprocess.run(command, env=env, check=False).returncode)
     elif args.action == "screenshot":
-        require("magick")
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        run("magick", "import", "-window", "root", str(output), env=env)
+        ocr_targets.screenshot(state, output, capture, service, raw=args.raw)
         print(output)
+    elif args.action == "query":
+        snapshot, target = ocr_targets.query(state, args.reference)
+        print(
+            json.dumps(
+                {
+                    **target,
+                    "image": snapshot["image"],
+                    "size": snapshot["size"],
+                    "coordinate_origin": "top-left",
+                    "bounds_format": "x1,y1,x2,y2 (exclusive end)",
+                },
+                indent=2,
+            )
+        )
+    elif args.action == "click":
+        require("xdotool")
+
+        def native_click(x, y):
+            run(
+                "xdotool",
+                "mousemove",
+                "--sync",
+                str(x),
+                str(y),
+                "click",
+                "--clearmodifiers",
+                "1",
+                env=env,
+            )
+
+        ocr_targets.click(state, args.reference, capture, native_click, service)
     elif args.action == "windows":
         require("xdotool")
         result = subprocess.run(
