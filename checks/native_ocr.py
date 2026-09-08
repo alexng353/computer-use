@@ -165,6 +165,8 @@ def main(directory):
         assert first["prefix"] == "a"
         query = json.loads(command("query", name, "@" + target["ref"]).stdout)
         assert query["center"] == target["center"]
+        assert query["screen_size"] == query["size"] == [1000, 700]
+        assert query["image_size"] == [1000, 700]
         command("click", name, "@" + target["ref"])
         wait_until(
             lambda: (directory / "clicked.json").exists(), "native click callback"
