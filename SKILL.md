@@ -48,6 +48,16 @@ On crowded screens, badges may use an added gutter on the right. The original sc
 
 For unannotated inspection, use `screenshot ... --raw`; this clears current references. For icons and other uncovered targets, inspect the current screenshot and use native coordinates below. Window IDs come from the session's window list.
 
+For an icon-heavy screen, run `computer-use setup-icons` once, then select the optional icon/button overlay:
+
+```bash
+computer-use screenshot invoice-task --targets icons --output /absolute/path/icons.png
+computer-use query invoice-task @b13
+computer-use click invoice-task @b13
+```
+
+Text-only remains the default on every capture; `--targets text` selects it explicitly. There is no combined overlay. The icon detector runs locally on CPU in a separate optional runtime and resident worker. It proposes visual regions, not guaranteed clickable controls; interpret the image before choosing a reference. Icon query results have `kind: "visual"`, `text: null` and `target_mode: "icons"`. Both modes share the same a–g reference sequence, native coordinates, pixel checks and input invalidation. Switching modes replaces the snapshot and retires all previous references. `--raw` cannot be combined with `--targets`.
+
 ```bash
 computer-use input invoice-task -- mousemove 450 300 click 1
 computer-use input invoice-task -- key --clearmodifiers ctrl+a
