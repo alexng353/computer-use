@@ -1,6 +1,6 @@
 # computer-use
 
-Native X11 desktop automation on a private virtual display, with local RapidOCR CPU text targets and optional icon/button detection. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
+Native X11 desktop automation on a private virtual display, with local OCR text targets, optional icon detection and native accessibility targets. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
 
 | Raw screenshot | OCR targets |
 |---|---|
@@ -70,6 +70,36 @@ Choose references from the current image. Switching modes takes a new screenshot
 
 Visual mode detects at the screenshot's full size (with model stride padding) and returns model-proposed bounds for icons, buttons and other visual regions. They are candidates, not proof of clickability. Inspect the image before clicking. The same query JSON includes `target_mode: "icons"`, `kind: "visual"` and `text: null`. Text snapshots report `target_mode: "text"`. Coordinates always refer to the original desktop pixels, including when labels use a gutter. A separate icon worker starts lazily, remains loaded, and stops with the session.
 
+## Native accessibility targets
+
+Use the app's accessibility roles and names to locate icon buttons and other controls. Text remains the screenshot default; accessibility is explicit:
+
+```bash
+computer-use setup-accessibility
+computer-use start accessible-demo --accessibility
+computer-use browser accessible-demo --no-cdp --url https://example.com
+computer-use screenshot accessible-demo --targets accessibility --output /tmp/controls.png
+# Choose the reference from this image:
+computer-use query accessible-demo @a13
+computer-use click accessible-demo @a13
+```
+
+The browser shortcut also accepts `virtual-browser start accessible-demo --accessibility --no-cdp --url https://example.com`. On an existing session, `launch --accessibility` or `browser --accessibility` enables the bus for that launch and future launches. Existing apps must be relaunched to acquire the new environment. The browser helper enables Chromium's native accessibility bridge and renderer support; when launching Chromium yourself with `launch`, additionally pass `--force-renderer-accessibility=complete`.
+
+| Text targets (default) | Accessibility targets |
+|---|---|
+| ![OCR on icon buttons](docs/images/accessibility-text.png) | ![Native accessible controls](docs/images/accessibility.png) |
+
+`setup-accessibility` checks dependencies without installing packages: `/usr/bin/python3` needs PyGObject, AT-SPI introspection and Pillow, alongside `at-spi2-core`, `dbus-daemon`, `busctl`, `xdotool` and libX11. On Arch the Python packages are `python-gobject` and `python-pillow`. This mode needs neither the OCR runtime nor the icon model. Each enabled session owns a private accessibility bus, registry and rendering worker. Each capture or click verification uses a fresh native reader with an eight-second timeout so libatspi cannot retain destroyed objects across reads. Host portal and accessibility access remain excluded from the filtered session bus.
+
+`--no-cdp` runs the packaged Helium executable directly, bypassing launcher-supplied flags, and opens no debugging port. It requires an ELF executable installed beside the Helium launcher (or a launcher that is itself the executable). Configured launcher flags are intentionally omitted in this mode; browser profile preferences still apply. Without `--no-cdp`, the existing CDP-enabled browser workflow is unchanged.
+
+Accessibility annotations cover the **focused window**. Use `windows` and `input -- windowfocus WINDOW_ID` if needed. The reader selects interactive roles, excludes hidden and disabled nodes, deduplicates equal role/name/bounds, clips to the screen/window/web viewport, checks the app's hit-test result, and omits centers covered by a higher native window. Native occlusion uses rectangular window bounds conservatively. Apps with incomplete accessibility support may omit controls or names; unnamed controls can still receive badges. Large or unresponsive trees fail with an actionable error; choose text or icon targets for those screens.
+
+Inspect the image before selecting a reference. Chromium's native hit test can return an approximate element while its renderer responds asynchronously. The reader requests repeated results to reduce these errors, but equal replies do not prove completion; covered web elements can still appear. Accessibility roles and names improve targeting, not guarantee that a control is unobscured.
+
+Queries include `kind: "accessibility"`, the accessible `role`, and the accessible name in `text` (possibly empty); `confidence` is null. They retain the same source coordinates, a–g references and mode-switch invalidation. Clicking rechecks the focused window, node path, role, name, visible bounds, hit testing and target pixels before native input. Queries remain cached reads. A change or verification error retires references and requires a fresh capture; identical-looking and identically-described replacement controls remain indistinguishable.
+
 ## Development
 
 ```bash
@@ -78,9 +108,12 @@ ruff check scripts checks
 ruff format --check scripts checks
 ~/.local/share/computer-use/ocr-venv/bin/python checks/ocr_contracts.py
 ~/.local/share/computer-use/ocr-venv/bin/python checks/icon_contracts.py
+python checks/accessibility_contracts.py
 python checks/native_ocr.py
 # After setup-ocr and setup-icons:
 python checks/native_icons.py
+# After setup-accessibility; requires Helium, tkinter and setup-ocr for assertions:
+python checks/native_accessibility.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.

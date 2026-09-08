@@ -213,9 +213,19 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--session-dir", type=Path)
     mode.add_argument("--warmup", action="store_true")
-    parser.add_argument("--targets", choices=["text", "icons"], default="text")
+    parser.add_argument(
+        "--targets", choices=["text", "icons", "accessibility"], default="text"
+    )
     args = parser.parse_args()
-    if args.targets == "icons":
+    if args.targets == "accessibility":
+        import accessibility_targets
+
+        if args.warmup:
+            accessibility_targets.check_dependencies()
+            return
+        detector = accessibility_targets.engine(args.session_dir)
+        recognize_targets = recognize_icons
+    elif args.targets == "icons":
         import icon_detector
 
         detector = icon_detector.engine()
@@ -227,7 +237,12 @@ def main():
         if args.targets == "icons":
             detector(Image.new("RGB", (96, 96), "white"))
         return
-    path = args.session_dir / ("icons.sock" if args.targets == "icons" else "ocr.sock")
+    path = args.session_dir / (
+        {"text": "ocr", "icons": "icons", "accessibility": "accessibility"}[
+            args.targets
+        ]
+        + ".sock"
+    )
     path.unlink(missing_ok=True)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(path))
@@ -246,6 +261,17 @@ def main():
                         result = recognize_targets(detector, message)
                     elif action == "verify":
                         result = verify(message)
+                        if args.targets == "accessibility" and result["matches"]:
+                            with Image.open(message["current"]) as current:
+                                targets = detector(current)
+                            expected = message["target"]
+                            keys = ("role", "text", "bounds", "path", "window")
+                            result["matches"] = any(
+                                all(
+                                    target.get(key) == expected.get(key) for key in keys
+                                )
+                                for target in targets
+                            )
                     else:
                         raise ValueError("Unknown OCR request")
                 except Exception as exc:  # noqa: BLE001 - A bad image must not kill the resident worker.
