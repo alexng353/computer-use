@@ -40,7 +40,7 @@ computer-use query invoice-task @a13
 computer-use click invoice-task @a13
 ```
 
-Read the letter-number badge on the current image before choosing a reference. `query` returns its text, pixel bounds, and center, measured from the screenshot's top left. Use the coordinates as anchors when a nearby icon has no text box. `click` verifies that the target pixels still match, moves to the center, and left-clicks through native X11 input.
+Read the letter-number badge on the current image before choosing a reference. `query` returns cached text, pixel bounds, and center, measured from the screenshot's top left; recapture first if the app may have changed. Use the coordinates as anchors when a nearby icon has no text box. `click` verifies that the target pixels still match, moves to the center, and left-clicks through native X11 input.
 
 After clicking, typing, scrolling, launching an app, or another `input`/`exec` command, take a fresh screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. A background redraw within the target box also rejects a click and requires recapture.
 
@@ -102,6 +102,6 @@ agent-browser --session invoice-task close
 computer-use stop invoice-task
 ```
 
-Save requested artifacts outside the session directory first. Stop terminates only the recorded services and removes temporary files and login profiles. It leaves Alex's existing browser and apps running. Verify the saved document or website result before claiming completion, and clean up task-owned desktops afterward.
+Save requested artifacts outside the session directory first. Stop cancels pending `input`/`exec` commands and terminates the recorded services, then removes the session files and login profiles. It leaves Alex's existing browser and apps running. Verify the saved document or website result before claiming completion, and clean up task-owned desktops afterward.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).

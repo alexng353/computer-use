@@ -80,8 +80,12 @@ def recognize(ocr, message):
         image = source.convert("RGB")
     output = ocr(image)
     targets = []
-    if output.boxes is not None:
-        for box, text, confidence in zip(output.boxes, output.txts, output.scores):
+    # Recognition failure can return detection-only output with no txts attribute.
+    boxes, texts, scores = (
+        getattr(output, key, None) for key in ("boxes", "txts", "scores")
+    )
+    if all(value is not None for value in (boxes, texts, scores)):
+        for box, text, confidence in zip(boxes, texts, scores, strict=True):
             if not text.strip() or not all(math.isfinite(float(v)) for v in box.flat):
                 continue
             left, top = box.min(axis=0)
