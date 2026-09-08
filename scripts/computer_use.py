@@ -2,16 +2,19 @@
 """Run and control X11 desktop apps on a private virtual display."""
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import secrets
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 import ocr_targets
@@ -68,6 +71,61 @@ def load(name):
     if not target.is_file():
         raise RuntimeError(f"Session {name!r} not found; run computer-use start {name}")
     return json.loads(target.read_text())
+
+
+@contextmanager
+def interaction_lock(name):
+    # A name's lock must survive stop/recreate while old commands are waiting.
+    locks = ROOT / ".locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (locks / (name + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def reload_session(expected):
+    current = load(expected["name"])
+    if current["prefix"] != expected["prefix"]:
+        raise RuntimeError(
+            "Session was replaced while this command waited; retry explicitly"
+        )
+    return current
+
+
+def stop_marker(state):
+    return Path(state["directory"]) / (state["prefix"] + ".stop")
+
+
+def run_interruptible(state, command, env):
+    def interrupted(_signum, _frame):
+        raise RuntimeError("Command interrupted")
+
+    previous = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        with subprocess.Popen(command, env=env, start_new_session=True) as process:
+            try:
+                while True:
+                    if stop_marker(state).exists():
+                        raise RuntimeError(
+                            "Command cancelled because the session is stopping"
+                        )
+                    try:
+                        return process.wait(timeout=0.1)
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def environment(state):
@@ -411,20 +469,24 @@ def main():
         )
         return
     if args.action == "start":
-        print(json.dumps(start(args.name, args.size), indent=2))
+        with interaction_lock(args.name):
+            print(json.dumps(start(args.name, args.size), indent=2))
         return
     state = load(args.name)
     if args.action == "status":
         print(json.dumps(status(state), indent=2))
         return
     if args.action == "stop":
-        with ocr_targets.interaction_lock(state):
-            stop(load(args.name))
-        print("Stopped session and removed its temporary files and login profiles")
-        return
-    with ocr_targets.interaction_lock(state):
-        # Other commands may have updated service ownership while we waited.
-        state = load(args.name)
+        # Signal an unbounded input/exec before waiting for its interaction lock.
+        stop_marker(state).touch()
+    with interaction_lock(args.name):
+        state = reload_session(state)
+        if args.action == "stop":
+            stop(state)
+            print("Stopped session and removed its temporary files and login profiles")
+            return
+        if stop_marker(state).exists():
+            raise RuntimeError("Session is stopping")
         check_session(state)
         perform(state, args, command)
 
@@ -447,7 +509,7 @@ def perform(state, args, command):
     elif args.action in ["exec", "input"]:
         if args.action == "input":
             command = ["xdotool", *command]
-        raise SystemExit(subprocess.run(command, env=env, check=False).returncode)
+        raise SystemExit(run_interruptible(state, command, env))
     elif args.action == "screenshot":
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -546,6 +608,12 @@ def perform(state, args, command):
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, subprocess.SubprocessError, sqlite3.Error) as exc:
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        sqlite3.Error,
+    ) as exc:
         print(f"computer-use: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

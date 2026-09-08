@@ -38,4 +38,4 @@ try:
 except subprocess.CalledProcessError as exc:
     if exc.stderr:
         print(exc.stderr, file=sys.stderr, end="")
-    raise SystemExit(exc.returncode)
+    raise SystemExit(exc.returncode) from None
