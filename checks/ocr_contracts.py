@@ -2,8 +2,12 @@
 
 import sys
 import tempfile
+import io
+import json
+from contextlib import redirect_stdout
 from itertools import combinations
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -12,6 +16,7 @@ from rapidocr.utils.output import RapidOCROutput
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from ocr_worker import annotate, badge_layout, recognize, verify
+from computer_use import perform
 
 
 def overlap(a, b):
@@ -68,6 +73,13 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
                 target,
             )
         assert rendered.width > dense.width, "Crowded labels need a separate gutter"
+        gutter = set(
+            rendered.crop(
+                (dense.width, 0, rendered.width, rendered.height)
+            ).get_flattened_data()
+        )
+        assert (253, 224, 71) in gutter, "Badges must be drawn"
+        assert (52, 211, 153) in gutter, "Connectors must be drawn"
     print("PASS dense annotations preserve every detected text pixel")
 
     for size, bounds in (
@@ -75,6 +87,7 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
         ((10, 10), [[0, 0, 10, 10]] * 8),
         ((200, 100), [[20, 40, 80, 60]]),
         ((400, 300), [[20, 40, 80, 60], [220, 140, 280, 160]]),
+        ((200, 100), [[60, 40, 70, 60], [75, 40, 85, 60], [90, 40, 100, 60]]),
         ((200, 100), []),
     ):
         cases = [{"bounds": box} for box in bounds]
@@ -115,3 +128,23 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
         assert rendered.width > result["size"][0]
         assert result["image_size"] == list(rendered.size)
     print("PASS gutter leaves original target coordinates and source size intact")
+
+    snapshot = dict(result, prefix="a", source=str(source), image=str(output))
+    (root / "ocr-snapshot.json").write_text(json.dumps(snapshot))
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        perform(
+            {
+                "directory": str(root),
+                "display": ":unused",
+                "xauthority": "unused",
+                "bus_socket": "unused",
+            },
+            SimpleNamespace(action="query", reference="@a1"),
+            [],
+        )
+    query = json.loads(printed.getvalue())
+    assert query["screen_size"] == query["size"] == [200, 100]
+    assert query["image_size"] == result["image_size"]
+    assert query["image_size"][0] > query["screen_size"][0]
+    print("PASS query reports distinct screen and rendered dimensions for a gutter")
