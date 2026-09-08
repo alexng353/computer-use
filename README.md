@@ -36,7 +36,7 @@ Screenshots print only the image path. The recognized text and geometry stay in 
 
 References advance through `@a1`, `@b1`, …, `@g1`, then wrap. A new capture replaces the reference map; all `input`, `exec`, launch/browser, clipboard-set, and click operations invalidate it. Queries do not invalidate it and return cached coordinates; they do not recheck live pixels. Use a fresh screenshot when the app may have changed. A click checks the current pixels within its text box against the captured pixels before sending native input. A changed target rejects the click. Repeated letters are intentionally short visual hints, not globally unique capture IDs: always use the latest image, including after wraparound. Pixels alone cannot distinguish two logically different controls with identical appearance.
 
-Badges avoid all detected text and other badges. On crowded screens, a gutter is added to the right for labels that cannot fit nearby. The source image stays at its original scale and top-left position; gutter labels still refer to their text boxes in the original screen. Connectors and outlines preserve the original pixels inside detected text boxes.
+Badges avoid all detected text and other badges. On crowded screens, a gutter is added to the right for labels that cannot fit nearby. The source image stays at its original scale and top-left position; gutter labels still refer to their text boxes in the original screen. Query JSON distinguishes `screen_size` (also available as the legacy `size`) from the rendered `image_size`; the latter is null for snapshots from older workers. Connectors and outlines leave detected text pixels untouched before image encoding.
 
 For unannotated images or targets that OCR misses:
 
