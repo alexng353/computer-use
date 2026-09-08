@@ -11,7 +11,12 @@ from rapidocr.ch_ppocr_det.utils import TextDetOutput
 from rapidocr.utils.output import RapidOCROutput
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from ocr_worker import annotate, badge_layout, overlap, recognize, verify
+from ocr_worker import annotate, badge_layout, recognize, verify
+
+
+def overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
 
 with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
     root = Path(temporary)
@@ -47,7 +52,9 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
         assert not verify(probe)["matches"]
     print("PASS complete SDK result, exact pixel comparison and resize rejection")
 
-    dense = Image.new("RGB", (200, 100), "#bacdef")
+    dense = Image.fromarray(
+        np.random.default_rng(0).integers(0, 256, (100, 200, 3), dtype=np.uint8)
+    )
     targets = [
         {"ref": f"a{index + 1}", "bounds": [0, y, 200, y + 14]}
         for index, y in enumerate(range(0, 96, 16))
@@ -67,6 +74,7 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
         ((200, 100), [target["bounds"] for target in targets]),
         ((10, 10), [[0, 0, 10, 10]] * 8),
         ((200, 100), [[20, 40, 80, 60]]),
+        ((400, 300), [[20, 40, 80, 60], [220, 140, 280, 160]]),
         ((200, 100), []),
     ):
         cases = [{"bounds": box} for box in bounds]
@@ -77,8 +85,12 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
             assert 0 <= badge[1] < badge[3] <= canvas_size[1]
             assert not any(overlap(badge, box) for box in bounds)
         assert not any(overlap(a, b) for a, b in combinations(badges, 2))
-        if len(cases) <= 1:
+        if len(cases) <= 2:
             assert canvas_size == size, "Uncrowded images should keep their size"
+            for badge, box in zip(badges, bounds, strict=True):
+                dx = max(box[0] - badge[2], badge[0] - box[2], 0)
+                dy = max(box[1] - badge[3], badge[1] - box[3], 0)
+                assert dx * dx + dy * dy <= 80**2, "Badge should stay nearby"
     print("PASS badge separation, edge clipping, tiny images and gutter overflow")
 
     dense.save(source)
@@ -101,4 +113,5 @@ with tempfile.TemporaryDirectory(prefix="computer-use-contract-") as temporary:
     ]
     with Image.open(output) as rendered:
         assert rendered.width > result["size"][0]
+        assert result["image_size"] == list(rendered.size)
     print("PASS gutter leaves original target coordinates and source size intact")

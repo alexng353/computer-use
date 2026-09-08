@@ -23,20 +23,15 @@ def engine():
     )
 
 
-def overlap(a, b):
-    return max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
-        0, min(a[3], b[3]) - max(a[1], b[1])
-    )
-
-
 def badge_layout(size, targets, widths):
     image_width, image_height = size
     height, gap = 20, 4
-    protected = [
-        (x1 - 2, y1 - 2, x2 + 2, y2 + 2)
-        for x1, y1, x2, y2 in (item["bounds"] for item in targets)
-    ]
-    occupied = []
+    # A pixel mask keeps dense screens from scanning every obstacle per candidate.
+    occupied = Image.new("1", size)
+    occupancy = ImageDraw.Draw(occupied)
+    for target in targets:
+        x1, y1, x2, y2 = target["bounds"]
+        occupancy.rectangle((x1 - 2, y1 - 2, x2 + 1, y2 + 1), fill=1)
     badges = []
     overflow = 0
     rows = max(1, (image_height - 16) // (height + gap))
@@ -73,7 +68,7 @@ def badge_layout(size, targets, widths):
             (
                 box
                 for box in sorted(candidates, key=distance)
-                if not any(overlap(box, obstacle) for obstacle in protected + occupied)
+                if occupied.crop(box).getbbox() is None
             ),
             None,
         )
@@ -85,7 +80,7 @@ def badge_layout(size, targets, widths):
             overflow += 1
         badges.append(badge)
         left, top, right, bottom = badge
-        occupied.append((left - 2, top - 2, right + 2, bottom + 2))
+        occupancy.rectangle((left - 2, top - 2, right + 1, bottom + 1), fill=1)
     columns = math.ceil(overflow / rows)
     return badges, (
         image_width + columns * column_width,
@@ -142,6 +137,7 @@ def annotate(image, targets, output):
         path.replace(output)
     finally:
         path.unlink(missing_ok=True)
+    return canvas.size
 
 
 def recognize(ocr, message):
@@ -177,8 +173,12 @@ def recognize(ocr, message):
     targets.sort(key=lambda item: (item["bounds"][1], item["bounds"][0]))
     for index, target in enumerate(targets, start=1):
         target["ref"] = message["prefix"] + str(index)
-    annotate(image, targets, Path(message["output"]))
-    return {"size": list(image.size), "targets": targets}
+    rendered_size = annotate(image, targets, Path(message["output"]))
+    return {
+        "size": list(image.size),
+        "image_size": list(rendered_size),
+        "targets": targets,
+    }
 
 
 def verify(message):
