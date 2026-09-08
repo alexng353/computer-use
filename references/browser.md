@@ -1,5 +1,21 @@
 # Browser details
 
+## Native accessibility workflow
+
+When browser instrumentation is prohibited or the task calls for native accessibility, use:
+
+```bash
+virtual-browser start native-task --accessibility --no-cdp \
+  --source-profile ~/.config/net.imput.helium --url https://example.com
+computer-use screenshot native-task --targets accessibility --output /absolute/path/controls.png
+computer-use query native-task @a13
+computer-use click native-task @a13
+```
+
+`--no-cdp` starts the packaged Helium executable with no remote-debugging port and bypasses launcher-configured flags. Returned `cdp_port` is null; do not attach agent-browser. Use native input, screenshots and accessibility targets. Browser profile preferences still apply, and the helper copies only the login material described below. The private accessibility bus is owned and stopped with this desktop. Existing apps must be relaunched after enabling accessibility. Manually launched Chromium needs `--force-renderer-accessibility=complete` as well as the session's `--accessibility` environment.
+
+## CDP workflow
+
 `computer-use browser NAME` adds Helium to an existing desktop. It creates a separate profile, disables sync and extensions, forces X11, and exposes CDP on loopback only. Read the actual `cdp_port` from its output or `computer-use status NAME`; never assume a port or display number.
 
 Omit `--source-profile` for a fresh browser without logins. For authorized access to Alex's signed-in Helium, use `--source-profile ~/.config/net.imput.helium`. `--profile` defaults to `Default`; inspect Local State when another profile is needed, without printing credentials.

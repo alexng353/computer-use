@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import ocr_targets
+import accessibility_targets
 
 ROOT = Path.home() / ".local/state/computer-use"
 
@@ -158,7 +159,8 @@ def environment(state):
         "MOZ_ENABLE_WAYLAND": "0",
         "XDG_ACTIVATION_TOKEN": "",
         "DESKTOP_STARTUP_ID": "",
-        "AT_SPI_BUS_ADDRESS": "",
+        "AT_SPI_BUS_ADDRESS": state.get("accessibility_bus", ""),
+        "ACCESSIBILITY_ENABLED": "1" if state.get("accessibility_bus") else "0",
     }
 
 
@@ -200,7 +202,7 @@ def stop(state, remove=True):
         shutil.rmtree(state["directory"])
 
 
-def start(name, size):
+def start(name, size, accessibility=False):
     require("Xvfb", "xauth", "xdpyinfo", "systemd-run", "xdg-dbus-proxy")
     if not re.fullmatch(r"[1-9][0-9]{2,3}x[1-9][0-9]{2,3}", size):
         raise RuntimeError("--size must be WIDTHxHEIGHT, from 100 to 9999 pixels")
@@ -291,6 +293,8 @@ def start(name, size):
             "Filtered bus did not become ready",
         )
         check_session(state)
+        if accessibility:
+            accessibility_targets.enable(state, service, save)
         return state
     except Exception:
         stop(state)
@@ -336,6 +340,31 @@ def launch(state, app_id, command):
     return state["apps"][app_id]
 
 
+def native_browser_command():
+    # Distribution wrappers may inject debugging flags from user/system config.
+    # Native mode invokes the packaged ELF binary with only the requested flags.
+    wrapper = Path(shutil.which("helium-browser")).resolve()
+    for binary in (wrapper, wrapper.with_name("helium")):
+        if binary.is_file() and os.access(binary, os.X_OK):
+            with binary.open("rb") as stream:
+                if stream.read(4) == b"\x7fELF":
+                    directory = wrapper.parent
+                    library_path = ":".join(
+                        str(directory / suffix) for suffix in (".", "lib", "lib.target")
+                    )
+                    if os.environ.get("LD_LIBRARY_PATH"):
+                        library_path += ":" + os.environ["LD_LIBRARY_PATH"]
+                    return [
+                        "env",
+                        "CHROME_WRAPPER=" + str(wrapper),
+                        "LD_LIBRARY_PATH=" + library_path,
+                        str(binary),
+                    ]
+    raise RuntimeError(
+        "--no-cdp requires the packaged Helium ELF binary beside its launcher"
+    )
+
+
 def browser(state, args):
     require("helium-browser")
     if not args.profile or "/" in args.profile or args.profile in [".", ".."]:
@@ -353,12 +382,23 @@ def browser(state, args):
             state,
             args.id,
             [
-                "helium-browser",
+                *(native_browser_command() if args.no_cdp else ["helium-browser"]),
                 "--ozone-platform=x11",
                 "--user-data-dir=" + str(profile),
                 "--profile-directory=" + args.profile,
-                "--remote-debugging-address=127.0.0.1",
-                "--remote-debugging-port=0",
+                *(
+                    []
+                    if args.no_cdp
+                    else [
+                        "--remote-debugging-address=127.0.0.1",
+                        "--remote-debugging-port=0",
+                    ]
+                ),
+                *(
+                    ["--force-renderer-accessibility=complete"]
+                    if state.get("accessibility_bus")
+                    else []
+                ),
                 "--disable-sync",
                 "--disable-extensions",
                 "--no-first-run",
@@ -369,6 +409,25 @@ def browser(state, args):
         )
 
         def ready():
+            if args.no_cdp:
+                pid = run(
+                    "systemctl",
+                    "--user",
+                    "show",
+                    "--value",
+                    "--property=MainPID",
+                    app["unit"],
+                ).stdout.strip()
+                return (
+                    pid != "0"
+                    and subprocess.run(
+                        ["xdotool", "search", "--onlyvisible", "--pid", pid],
+                        env=dict(os.environ, **environment(state)),
+                        capture_output=True,
+                        check=False,
+                    ).returncode
+                    == 0
+                )
             try:
                 port = int((profile / "DevToolsActivePort").read_text().splitlines()[0])
                 with urllib.request.urlopen(
@@ -378,9 +437,8 @@ def browser(state, args):
             except (OSError, ValueError, IndexError):
                 return None
 
-        app["cdp_port"] = poll(
-            ready, "Helium did not expose CDP; inspect its systemd journal"
-        )
+        port = poll(ready, "Helium did not become ready; inspect its systemd journal")
+        app["cdp_port"] = None if args.no_cdp else port
         app["profile"] = str(profile)
         save(state)
         return app
@@ -415,6 +473,9 @@ def parser():
     commands.add_parser(
         "setup-icons", help="Install and warm optional local CPU icon detection"
     )
+    commands.add_parser(
+        "setup-accessibility", help="Check native accessibility dependencies"
+    )
     for action in [
         "start",
         "status",
@@ -433,7 +494,17 @@ def parser():
         sub.add_argument("name", type=identifier)
         if action == "start":
             sub.add_argument("--size", default="1440x1000")
+            sub.add_argument(
+                "--accessibility",
+                action="store_true",
+                help="Enable a private accessibility bus for this session",
+            )
         elif action in ["launch", "browser"]:
+            sub.add_argument(
+                "--accessibility",
+                action="store_true",
+                help="Enable accessibility for this and future app launches",
+            )
             sub.add_argument(
                 "--id",
                 type=identifier,
@@ -443,6 +514,11 @@ def parser():
                 sub.add_argument("--source-profile", type=Path)
                 sub.add_argument("--profile", default="Default")
                 sub.add_argument("--url", default="about:blank")
+                sub.add_argument(
+                    "--no-cdp",
+                    action="store_true",
+                    help="Launch with native input and no debugging port",
+                )
         elif action == "screenshot":
             sub.add_argument("--output", type=Path, required=True)
             capture_mode = sub.add_mutually_exclusive_group()
@@ -451,7 +527,7 @@ def parser():
             )
             capture_mode.add_argument(
                 "--targets",
-                choices=["text", "icons"],
+                choices=["text", "icons", "accessibility"],
                 default="text",
                 help="Annotation targets (default: text)",
             )
@@ -477,6 +553,10 @@ def main():
         cli.error(
             "launch, exec and input require a command after --; other actions do not"
         )
+    if args.action == "setup-accessibility":
+        accessibility_targets.check_dependencies()
+        print("Native accessibility dependencies ready")
+        return
     if args.action in ["setup-ocr", "setup-icons"]:
         require("uv")
         if args.action == "setup-icons":
@@ -504,7 +584,12 @@ def main():
         return
     if args.action == "start":
         with interaction_lock(args.name):
-            print(json.dumps(start(args.name, args.size), indent=2))
+            print(
+                json.dumps(
+                    start(args.name, args.size, accessibility=args.accessibility),
+                    indent=2,
+                )
+            )
         return
     state = load(args.name)
     if args.action == "status":
@@ -526,6 +611,8 @@ def main():
 
 
 def perform(state, args, command):
+    if args.action in ["launch", "browser"] and args.accessibility:
+        accessibility_targets.enable(state, service, save)
     env = dict(os.environ, **environment(state))
 
     def capture(output):

@@ -58,6 +58,23 @@ computer-use click invoice-task @b13
 
 Text-only remains the default on every capture; `--targets text` selects it explicitly. There is no combined overlay. The icon detector runs locally on CPU in a separate optional runtime and resident worker. It proposes visual regions, not guaranteed clickable controls; interpret the image before choosing a reference. Icon query results have `kind: "visual"`, `text: null` and `target_mode: "icons"`. Both modes share the same a–g reference sequence, native coordinates, pixel checks and input invalidation. Switching modes replaces the snapshot and retires all previous references. `--raw` cannot be combined with `--targets`.
 
+For semantic buttons and fields, enable the session's private accessibility bus when starting or launching the app:
+
+```bash
+computer-use setup-accessibility
+computer-use start accessible-task --accessibility
+computer-use browser accessible-task --no-cdp --url https://example.com
+computer-use screenshot accessible-task --targets accessibility --output /absolute/path/controls.png
+computer-use query accessible-task @a13
+computer-use click accessible-task @a13
+```
+
+`setup-accessibility` checks system dependencies; it does not install packages. Existing sessions can enable the bus with `launch --accessibility` or `browser --accessibility`, but already-running apps need relaunching. Only the focused window is annotated: use the session's window list and `input -- windowfocus WINDOW_ID` if necessary. Queries return the accessible name in `text`, plus `role` and `kind: "accessibility"`. Some apps omit names or controls. If the tree is unavailable or exceeds its read limit, choose text or icon targets explicitly.
+
+Accessibility clicks recheck semantics, focus, visible bounds and target pixels. Hidden/disabled nodes, duplicate controls and centers obscured by higher native windows are excluded. A failed verification requires recapture. The a–g reference and mode-switch rules are shared across all three modes. Text stays the default. For native browser operation without CDP, including sites where browser instrumentation is prohibited, use `--no-cdp`; see [browser details](references/browser.md).
+
+Inspect the screenshot before clicking an accessibility reference. Chromium can return cached approximations even after repeated native hit tests, so a badge does not prove a web control is unobscured. Each read uses a fresh native process to avoid stale accessibility objects after navigation.
+
 ```bash
 computer-use input invoice-task -- mousemove 450 300 click 1
 computer-use input invoice-task -- key --clearmodifiers ctrl+a

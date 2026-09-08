@@ -10,10 +10,12 @@ import time
 from pathlib import Path
 
 import icon_detector
+import accessibility_targets
 
 RUNTIME = Path.home() / ".local/share/computer-use/ocr-venv"
 SCRIPTS = Path(__file__).resolve().parent
 PREFIXES = "abcdefg"
+WORKERS = {"text": "ocr", "icons": "icons", "accessibility": "accessibility"}
 
 
 def invalidate(state):
@@ -42,9 +44,7 @@ def setup():
 
 
 def socket_path(state, target_mode):
-    return Path(state["directory"]) / (
-        "icons.sock" if target_mode == "icons" else "ocr.sock"
-    )
+    return Path(state["directory"]) / (WORKERS[target_mode] + ".sock")
 
 
 def request(state, message, timeout=60, target_mode="text"):
@@ -61,8 +61,17 @@ def request(state, message, timeout=60, target_mode="text"):
 
 
 def ensure_worker(state, start_service, target_mode="text"):
-    if target_mode not in ["text", "icons"]:
-        raise ValueError("Target mode must be text or icons")
+    if target_mode not in WORKERS:
+        raise ValueError("Target mode must be text, icons or accessibility")
+    if target_mode == "accessibility":
+        if state.get("accessibility_bus") != accessibility_targets.bus_address(state):
+            raise RuntimeError(
+                "Launch an app or start a session with --accessibility first; existing apps need relaunching"
+            )
+        if not accessibility_targets.services_alive(state):
+            raise RuntimeError(
+                "Accessibility bus stopped; recreate the session and relaunch its apps"
+            )
     if len(os.fsencode(socket_path(state, target_mode))) >= 108:
         raise RuntimeError(
             "Session path is too long for the OCR socket; use a shorter name or --raw"
@@ -75,6 +84,9 @@ def ensure_worker(state, start_service, target_mode="text"):
     python = (
         icon_detector.RUNTIME if target_mode == "icons" else RUNTIME
     ) / "bin/python"
+    if target_mode == "accessibility":
+        accessibility_targets.check_dependencies()
+        python = accessibility_targets.PYTHON
     if not python.exists():
         raise RuntimeError(
             "Targets are not installed; run computer-use "
@@ -85,9 +97,7 @@ def ensure_worker(state, start_service, target_mode="text"):
         raise RuntimeError(
             "Icon model missing or invalid; run computer-use setup-icons"
         )
-    unit = state["prefix"] + (
-        "-icons.service" if target_mode == "icons" else "-ocr.service"
-    )
+    unit = state["prefix"] + "-" + WORKERS[target_mode] + ".service"
     # Restart a crashed worker without duplicating the session's ownership record.
     if unit in state["units"]:
         subprocess.run(
@@ -198,6 +208,7 @@ def query(state, reference):
 
 def click(state, reference, capture, native_click, start_service):
     snapshot, target = query(state, reference)
+    invalidate(state)
     target_mode = snapshot.get("target_mode", "text")
     ensure_worker(state, start_service, target_mode=target_mode)
     # A background redraw can happen even when no command has sent input.
@@ -210,12 +221,12 @@ def click(state, reference, capture, native_click, start_service):
                 "source": snapshot["source"],
                 "current": current.name,
                 "bounds": target["bounds"],
+                "target": target,
             },
             target_mode=target_mode,
         )
-    invalidate(state)
     if not verified["matches"]:
         raise RuntimeError(
-            "Target pixels changed; take a fresh screenshot before clicking"
+            "Target pixels changed or accessibility target changed; take a fresh screenshot before clicking"
         )
     native_click(*target["center"])
