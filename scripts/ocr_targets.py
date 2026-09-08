@@ -9,6 +9,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import icon_detector
+
 RUNTIME = Path.home() / ".local/share/computer-use/ocr-venv"
 SCRIPTS = Path(__file__).resolve().parent
 PREFIXES = "abcdefg"
@@ -39,10 +41,16 @@ def setup():
     )
 
 
-def request(state, message, timeout=60):
+def socket_path(state, target_mode):
+    return Path(state["directory"]) / (
+        "icons.sock" if target_mode == "icons" else "ocr.sock"
+    )
+
+
+def request(state, message, timeout=60, target_mode="text"):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(timeout)
-        connection.connect(str(Path(state["directory"]) / "ocr.sock"))
+        connection.connect(str(socket_path(state, target_mode)))
         connection.sendall(json.dumps(message).encode() + b"\n")
         with connection.makefile("rb") as response:
             line = response.readline(4 * 1024 * 1024)
@@ -52,22 +60,34 @@ def request(state, message, timeout=60):
     return result
 
 
-def ensure_worker(state, start_service):
-    if len(os.fsencode(Path(state["directory"]) / "ocr.sock")) >= 108:
+def ensure_worker(state, start_service, target_mode="text"):
+    if target_mode not in ["text", "icons"]:
+        raise ValueError("Target mode must be text or icons")
+    if len(os.fsencode(socket_path(state, target_mode))) >= 108:
         raise RuntimeError(
             "Session path is too long for the OCR socket; use a shorter name or --raw"
         )
     try:
-        request(state, {"action": "ping"}, timeout=1)
+        request(state, {"action": "ping"}, timeout=1, target_mode=target_mode)
         return
     except (OSError, ValueError):
         pass
-    python = RUNTIME / "bin/python"
+    python = (
+        icon_detector.RUNTIME if target_mode == "icons" else RUNTIME
+    ) / "bin/python"
     if not python.exists():
         raise RuntimeError(
-            "OCR is not installed; run computer-use setup-ocr, or screenshot --raw"
+            "Targets are not installed; run computer-use "
+            + ("setup-icons" if target_mode == "icons" else "setup-ocr")
+            + ", or screenshot --raw"
         )
-    unit = state["prefix"] + "-ocr.service"
+    if target_mode == "icons" and not icon_detector.valid_model(icon_detector.MODEL):
+        raise RuntimeError(
+            "Icon model missing or invalid; run computer-use setup-icons"
+        )
+    unit = state["prefix"] + (
+        "-icons.service" if target_mode == "icons" else "-ocr.service"
+    )
     # Restart a crashed worker without duplicating the session's ownership record.
     if unit in state["units"]:
         subprocess.run(
@@ -89,12 +109,14 @@ def ensure_worker(state, start_service):
             str(SCRIPTS / "ocr_worker.py"),
             "--session-dir",
             state["directory"],
+            "--targets",
+            target_mode,
         ],
     )
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         try:
-            request(state, {"action": "ping"}, timeout=1)
+            request(state, {"action": "ping"}, timeout=1, target_mode=target_mode)
             return
         except (OSError, ValueError):
             time.sleep(0.05)
@@ -107,34 +129,46 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
-def screenshot(state, output, capture, start_service, raw=False):
+def screenshot(state, output, capture, start_service, raw=False, target_mode="text"):
     invalidate(state)
     if raw:
         capture(output)
         return
-    ensure_worker(state, start_service)
+    ensure_worker(state, start_service, target_mode=target_mode)
     directory = Path(state["directory"])
     counter = directory / "ocr-generation.json"
     generation = json.loads(counter.read_text()) + 1 if counter.exists() else 0
     atomic_json(counter, generation)
     prefix = PREFIXES[generation % len(PREFIXES)]
     source = directory / "ocr-screen.png"
-    capture(source)
-    result = request(
-        state,
-        {
-            "action": "recognize",
-            "source": str(source),
-            "output": str(output),
-            "prefix": prefix,
-        },
-    )
+    # A timed-out worker may still finish after a later capture in the other mode.
+    # Only this client can publish to the shared source and caller's output path.
+    with (
+        tempfile.TemporaryDirectory(dir=directory, prefix=".capture-") as temporary,
+        tempfile.TemporaryDirectory(dir=output.parent, prefix=".capture-") as preview,
+    ):
+        pending_source = Path(temporary) / "source.png"
+        pending_output = Path(preview) / ("preview" + output.suffix)
+        capture(pending_source)
+        result = request(
+            state,
+            {
+                "action": "recognize",
+                "source": str(pending_source),
+                "output": str(pending_output),
+                "prefix": prefix,
+            },
+            target_mode=target_mode,
+        )
+        pending_source.replace(source)
+        pending_output.replace(output)
     atomic_json(
         directory / "ocr-snapshot.json",
         {
             "prefix": prefix,
             "source": str(source),
             "image": str(output),
+            "target_mode": target_mode,
             **result,
         },
     )
@@ -164,7 +198,8 @@ def query(state, reference):
 
 def click(state, reference, capture, native_click, start_service):
     snapshot, target = query(state, reference)
-    ensure_worker(state, start_service)
+    target_mode = snapshot.get("target_mode", "text")
+    ensure_worker(state, start_service, target_mode=target_mode)
     # A background redraw can happen even when no command has sent input.
     with tempfile.NamedTemporaryFile(dir=state["directory"], suffix=".png") as current:
         capture(Path(current.name))
@@ -176,6 +211,7 @@ def click(state, reference, capture, native_click, start_service):
                 "current": current.name,
                 "bounds": target["bounds"],
             },
+            target_mode=target_mode,
         )
     invalidate(state)
     if not verified["matches"]:

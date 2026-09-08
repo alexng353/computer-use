@@ -1,6 +1,6 @@
 # computer-use
 
-Native X11 desktop automation on a private virtual display, with local RapidOCR CPU text targets. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
+Native X11 desktop automation on a private virtual display, with local RapidOCR CPU text targets and optional icon/button detection. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
 
 | Raw screenshot | OCR targets |
 |---|---|
@@ -47,6 +47,29 @@ computer-use input demo -- mousemove 450 300 click 1
 
 Raw capture clears references and does not require OCR. The existing input, clipboard, window, and browser commands remain available. See [SKILL.md](SKILL.md) for the complete desktop workflow and isolation boundaries.
 
+## Optional icon/button targets
+
+Text-only annotations remain the default. For screens with icon controls, select the separate visual mode:
+
+| Default text targets | Optional `--targets icons` |
+|---|---|
+| ![Default text annotations](docs/images/targets.png) | ![Optional visual regions](docs/images/icons.png) |
+
+```bash
+computer-use setup-icons
+computer-use screenshot demo --targets icons --output /tmp/icons.png
+computer-use query demo @b13
+computer-use click demo @b13
+# The next screenshot returns to text unless explicitly selected again:
+computer-use screenshot demo --output /tmp/text.png
+```
+
+Choose references from the current image. Switching modes takes a new screenshot and invalidates all earlier references, using the same a–g sequence and pixel verification. `--targets text` explicitly selects the default; `--raw` and `--targets` cannot be combined. Combined text/icon overlays are not offered.
+
+`setup-icons` installs a separate locked Python environment in `~/.local/share/computer-use/icons-venv`, downloads the 40.6 MB [Microsoft OmniParser v2 icon detector](https://huggingface.co/microsoft/OmniParser-v2.0/tree/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect) at a pinned revision, verifies its SHA-256, and warms the CPU model. The publisher licenses these weights under AGPL-3.0; see the [model license](https://huggingface.co/microsoft/OmniParser-v2.0/blob/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect/LICENSE). Text mode requires none of these packages. Icon screenshots do not run OCR or generate icon captions, and neither mode uploads screenshots.
+
+Visual mode detects at the screenshot's full size (with model stride padding) and returns model-proposed bounds for icons, buttons and other visual regions. They are candidates, not proof of clickability. Inspect the image before clicking. The same query JSON includes `target_mode: "icons"`, `kind: "visual"` and `text: null`. Text snapshots report `target_mode: "text"`. Coordinates always refer to the original desktop pixels, including when labels use a gutter. A separate icon worker starts lazily, remains loaded, and stops with the session.
+
 ## Development
 
 ```bash
@@ -54,7 +77,10 @@ python -m py_compile scripts/*.py checks/*.py
 ruff check scripts checks
 ruff format --check scripts checks
 ~/.local/share/computer-use/ocr-venv/bin/python checks/ocr_contracts.py
+~/.local/share/computer-use/ocr-venv/bin/python checks/icon_contracts.py
 python checks/native_ocr.py
+# After setup-ocr and setup-icons:
+python checks/native_icons.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.
@@ -62,3 +88,5 @@ No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/re
 The native check additionally requires tkinter and an active user systemd bus. It creates uniquely named Xvfb desktops and removes them on completion. `python checks/native_ocr.py --output /tmp/ocr-check` retains artifacts, including `initial-raw.png` and `initial-targets.png`, which reproduce the README preview. The contract check exercises the SDK's detection-only return type and pixel verification without a desktop.
 
 To update the resolved dependency set, run `uv pip compile scripts/ocr-requirements.txt --python-version 3.12 --no-header --no-annotate -o scripts/ocr-requirements.lock`, then run setup and both checks.
+
+For the optional icon runtime, use `uv pip compile scripts/icon-requirements.txt --python-version 3.12 --torch-backend cpu --no-header --no-annotate -o scripts/icon-requirements.lock`, then rerun `setup-icons` and `checks/native_icons.py`. `setup-icons` explicitly requests CPU PyTorch wheels when syncing this lock.

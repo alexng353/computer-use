@@ -9,10 +9,11 @@ import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
-from rapidocr import RapidOCR
 
 
 def engine():
+    from rapidocr import RapidOCR
+
     return RapidOCR(
         params={
             "Global.use_cls": False,
@@ -170,6 +171,16 @@ def recognize(ocr, message):
                     "center": [(x1 + x2 - 1) // 2, (y1 + y2 - 1) // 2],
                 }
             )
+    return publish(image, targets, message)
+
+
+def recognize_icons(detector, message):
+    with Image.open(message["source"]) as source:
+        image = source.convert("RGB")
+    return publish(image, detector(image), message)
+
+
+def publish(image, targets, message):
     targets.sort(key=lambda item: (item["bounds"][1], item["bounds"][0]))
     for index, target in enumerate(targets, start=1):
         target["ref"] = message["prefix"] + str(index)
@@ -202,11 +213,21 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--session-dir", type=Path)
     mode.add_argument("--warmup", action="store_true")
+    parser.add_argument("--targets", choices=["text", "icons"], default="text")
     args = parser.parse_args()
-    ocr = engine()
+    if args.targets == "icons":
+        import icon_detector
+
+        detector = icon_detector.engine()
+        recognize_targets = recognize_icons
+    else:
+        detector = engine()
+        recognize_targets = recognize
     if args.warmup:
+        if args.targets == "icons":
+            detector(Image.new("RGB", (96, 96), "white"))
         return
-    path = args.session_dir / "ocr.sock"
+    path = args.session_dir / ("icons.sock" if args.targets == "icons" else "ocr.sock")
     path.unlink(missing_ok=True)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(str(path))
@@ -222,7 +243,7 @@ def main():
                     if action == "ping":
                         result = {"ready": True}
                     elif action == "recognize":
-                        result = recognize(ocr, message)
+                        result = recognize_targets(detector, message)
                     elif action == "verify":
                         result = verify(message)
                     else:

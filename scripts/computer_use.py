@@ -412,6 +412,9 @@ def parser():
     commands = cli.add_subparsers(dest="action", required=True)
     commands.add_parser("list", help="List owned sessions")
     commands.add_parser("setup-ocr", help="Install and warm the local CPU OCR runtime")
+    commands.add_parser(
+        "setup-icons", help="Install and warm optional local CPU icon detection"
+    )
     for action in [
         "start",
         "status",
@@ -442,8 +445,15 @@ def parser():
                 sub.add_argument("--url", default="about:blank")
         elif action == "screenshot":
             sub.add_argument("--output", type=Path, required=True)
-            sub.add_argument(
-                "--raw", action="store_true", help="Capture without OCR targets"
+            capture_mode = sub.add_mutually_exclusive_group()
+            capture_mode.add_argument(
+                "--raw", action="store_true", help="Capture without targets"
+            )
+            capture_mode.add_argument(
+                "--targets",
+                choices=["text", "icons"],
+                default="text",
+                help="Annotation targets (default: text)",
             )
         elif action in ["click", "query"]:
             sub.add_argument(
@@ -467,10 +477,19 @@ def main():
         cli.error(
             "launch, exec and input require a command after --; other actions do not"
         )
-    if args.action == "setup-ocr":
+    if args.action in ["setup-ocr", "setup-icons"]:
         require("uv")
-        ocr_targets.setup()
-        print("Local CPU OCR runtime ready")
+        if args.action == "setup-icons":
+            import icon_detector
+
+            icon_detector.setup()
+        else:
+            ocr_targets.setup()
+        print(
+            "Local CPU "
+            + ("icon" if args.action == "setup-icons" else "OCR")
+            + " runtime ready"
+        )
         return
     if args.action == "list":
         print(
@@ -528,7 +547,9 @@ def perform(state, args, command):
     elif args.action == "screenshot":
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        ocr_targets.screenshot(state, output, capture, service, raw=args.raw)
+        ocr_targets.screenshot(
+            state, output, capture, service, raw=args.raw, target_mode=args.targets
+        )
         print(output)
     elif args.action == "query":
         snapshot, target = ocr_targets.query(state, args.reference)
@@ -540,6 +561,7 @@ def perform(state, args, command):
                     "size": snapshot["size"],
                     "screen_size": snapshot["size"],
                     "image_size": snapshot.get("image_size"),
+                    "target_mode": snapshot.get("target_mode", "text"),
                     "coordinate_origin": "top-left",
                     "bounds_format": "x1,y1,x2,y2 (exclusive end)",
                 },
