@@ -43,16 +43,18 @@ with contextlib.redirect_stderr(io.StringIO()):
     except SystemExit:
         raise AssertionError("Screenshots must accept accessibility targets") from None
 assert args.targets == "accessibility"
+assert parser.parse_args(["start", "demo"]).accessibility
+assert not parser.parse_args(["start", "demo", "--no-accessibility"]).accessibility
 assert parser.parse_args(["start", "demo", "--accessibility"]).accessibility
 args = parser.parse_args(["browser", "demo", "--accessibility", "--no-cdp"])
 assert args.accessibility and args.no_cdp
 assert parser.parse_args(["launch", "demo", "--accessibility"]).accessibility
 assert (
     parser.parse_args(["screenshot", "demo", "--output", "/tmp/a.png"]).targets
-    == "text"
+    == "accessibility"
 )
 assert "gi" not in sys.modules and "torch" not in sys.modules
-print("PASS optional accessibility mode and native browser flags preserve text default")
+print("PASS accessibility defaults, explicit opt-out and native browser flags")
 
 
 def control(**changes):

@@ -5,7 +5,7 @@ description: Operate native Linux apps and browsers on an isolated virtual deskt
 
 # Computer use
 
-Use a separate Xvfb desktop for GUI work. Prefer an app's supported API or CLI when it can complete the task directly; use screenshots and native input for desktop UI, and agent-browser/CDP for browser content.
+Use a separate Xvfb desktop for GUI work. Prefer an app's supported API or CLI when it can complete the task directly; use screenshots, accessibility targets and native input for app and browser UI. Use agent-browser/CDP when the task benefits from DOM access and permits browser instrumentation.
 
 The global `computer-use` command is on PATH. It creates owner-only session files under `~/.local/state/computer-use/<name>` and manages Xvfb, a filtered D-Bus proxy, and launched apps as separate user systemd services. `virtual-browser` is a shortcut for starting a desktop with Helium already attached.
 
@@ -32,7 +32,7 @@ There is no window manager by default. `windowfocus`, `windowraise`, `windowmove
 
 ## Observe and interact
 
-Run `computer-use setup-ocr` once to install the pinned RapidOCR CPU runtime and prepare its models. Annotated screenshots are the default. View the returned image with the image-viewing tool; the command prints its path, not the OCR text list. A resident worker stays loaded for each desktop and stops with the session.
+Accessibility annotations are the default. New desktops enable their private accessibility bus automatically, and the browser helper enables Chromium's native accessibility support. Run `computer-use setup-accessibility` to check the system dependencies; it does not install packages.
 
 ```bash
 computer-use screenshot invoice-task --output /absolute/path/desktop.png
@@ -40,40 +40,28 @@ computer-use query invoice-task @a13
 computer-use click invoice-task @a13
 ```
 
-Read the letter-number badge on the current image before choosing a reference. `query` returns cached text, pixel bounds, and center, measured from the screenshot's top left; recapture first if the app may have changed. Use the coordinates as anchors when a nearby icon has no text box. `click` verifies that the target pixels still match, moves to the center, and left-clicks through native X11 input.
+View the returned image and choose a letter-number badge from it. Screenshots print the image path; queries return the accessible name in `text`, its `role`, `kind: "accessibility"`, pixel bounds and center. Coordinates start at the original screenshot's top left. Only the focused window is annotated: use `windows` and `input -- windowfocus WINDOW_ID` when needed. Manually launched Chromium also needs `--force-renderer-accessibility=complete`.
 
-After clicking, typing, scrolling, launching an app, or another `input`/`exec` command, take a fresh screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. A background redraw within the target box also rejects a click and requires recapture.
+`query` reads the current cached target. `click` rechecks focus, target semantics, bounds and pixels, then moves to the center and clicks through native X11 input. Inspect the screenshot before clicking: Chromium can return approximate hit-test results, so a badge does not prove a web control is unobscured. Hidden/disabled nodes, duplicate controls and centers obscured by higher native windows are excluded. Each read uses a fresh native process to avoid stale accessibility objects after navigation.
 
-On crowded screens, badges may use an added gutter on the right. The original screen stays at its original scale and top-left position. Gutter pixels are not desktop coordinates; use `query` or `click` with the badge reference to target its original text box.
+After clicking, typing, scrolling, launching an app, or another `input`/`exec` command, take a fresh screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. Failed click verification retires references and requires recapture.
 
-For unannotated inspection, use `screenshot ... --raw`; this clears current references. For icons and other uncovered targets, inspect the current screenshot and use native coordinates below. Window IDs come from the session's window list.
+On crowded screens, badges may use an added gutter on the right. The original screen stays at its original scale and top-left position. Gutter pixels are not desktop coordinates; use `query` or `click` with the badge reference to target its original control.
 
-For an icon-heavy screen, run `computer-use setup-icons` once, then select the optional icon/button overlay:
+If an app exposes an incomplete tree, the reader exceeds its limit, or text content is easier to target, select a fallback explicitly:
 
 ```bash
+# OCR text targets:
+computer-use setup-ocr
+computer-use screenshot invoice-task --targets text --output /absolute/path/text.png
+# Visual icon/button candidates:
+computer-use setup-icons
 computer-use screenshot invoice-task --targets icons --output /absolute/path/icons.png
-computer-use query invoice-task @b13
-computer-use click invoice-task @b13
 ```
 
-Text-only remains the default on every capture; `--targets text` selects it explicitly. There is no combined overlay. The icon detector runs locally on CPU in a separate optional runtime and resident worker. It proposes visual regions, not guaranteed clickable controls; interpret the image before choosing a reference. Icon query results have `kind: "visual"`, `text: null` and `target_mode: "icons"`. Both modes share the same a–g reference sequence, native coordinates, pixel checks and input invalidation. Switching modes replaces the snapshot and retires all previous references. `--raw` cannot be combined with `--targets`.
+These optional runtimes run locally on CPU. OCR returns recognized text boxes; the icon detector proposes visual regions, including some noninteractive content. Icon query results have `kind: "visual"` and `text: null`. Choose references from the image before querying or clicking. There is no combined overlay. All modes share coordinates, the a–g sequence and invalidation; switching modes replaces the current snapshot. The next screenshot defaults to accessibility again.
 
-For semantic buttons and fields, enable the session's private accessibility bus when starting or launching the app:
-
-```bash
-computer-use setup-accessibility
-computer-use start accessible-task --accessibility
-computer-use browser accessible-task --no-cdp --url https://example.com
-computer-use screenshot accessible-task --targets accessibility --output /absolute/path/controls.png
-computer-use query accessible-task @a13
-computer-use click accessible-task @a13
-```
-
-`setup-accessibility` checks system dependencies; it does not install packages. Existing sessions can enable the bus with `launch --accessibility` or `browser --accessibility`, but already-running apps need relaunching. Only the focused window is annotated: use the session's window list and `input -- windowfocus WINDOW_ID` if necessary. Queries return the accessible name in `text`, plus `role` and `kind: "accessibility"`. Some apps omit names or controls. If the tree is unavailable or exceeds its read limit, choose text or icon targets explicitly.
-
-Accessibility clicks recheck semantics, focus, visible bounds and target pixels. Hidden/disabled nodes, duplicate controls and centers obscured by higher native windows are excluded. A failed verification requires recapture. The a–g reference and mode-switch rules are shared across all three modes. Text stays the default. For native browser operation without CDP, including sites where browser instrumentation is prohibited, use `--no-cdp`; see [browser details](references/browser.md).
-
-Inspect the screenshot before clicking an accessibility reference. Chromium can return cached approximations even after repeated native hit tests, so a badge does not prove a web control is unobscured. Each read uses a fresh native process to avoid stale accessibility objects after navigation.
+For unannotated inspection, use `screenshot ... --raw`; this clears references and cannot be combined with `--targets`. If accessibility dependencies are unavailable, create the desktop with `start --no-accessibility` and use explicit text/icon targets or raw capture. For an older desktop created without the private bus, `launch --accessibility` or `browser --accessibility` enables it for that launch and future launches; already-running apps need relaunching.
 
 ```bash
 computer-use input invoice-task -- mousemove 450 300 click 1
@@ -98,7 +86,7 @@ The clipboard helper holds an X11 selection within this desktop. It never calls 
 
 ## Browsers
 
-For browser work, read the agent-browser skill and `agent-browser skills get core`. Read [references/browser.md](references/browser.md) for copied login state, CDP connection, and file-upload details.
+Read [references/browser.md](references/browser.md) for copied login state and browser setup. Prefer native accessibility targets and input, launching with `--no-cdp`. When a task needs DOM/CDP operations and permits browser instrumentation, read the agent-browser skill and `agent-browser skills get core` before attaching:
 
 ```bash
 computer-use browser invoice-task --id browser \
@@ -112,7 +100,7 @@ agent-browser --session invoice-task snapshot -i
 For a browser-only task, the shortcut creates both desktop and browser:
 
 ```bash
-virtual-browser start research-task --url https://example.com
+virtual-browser start research-task --no-cdp --url https://example.com
 ```
 
 Both commands use the same session registry. `computer-use status`, `screenshot`, and `stop` work with sessions created by either command.

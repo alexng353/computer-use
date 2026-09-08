@@ -1,23 +1,23 @@
 # computer-use
 
-Native X11 desktop automation on a private virtual display, with local OCR text targets, optional icon detection and native accessibility targets. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
+Native X11 desktop automation on a private virtual display, with native accessibility targets by default and optional local OCR and icon detection. Screenshots show letter-number badges; commands can query their coordinates or click their centers without browser instrumentation.
 
-| Raw screenshot | OCR targets |
+| Optional OCR text targets | Default accessibility targets |
 |---|---|
-| ![Raw native window](docs/images/raw.png) | ![Letter-number targets](docs/images/targets.png) |
+| ![OCR on icon buttons](docs/images/accessibility-text.png) | ![Native accessible controls](docs/images/accessibility.png) |
 
 ## Setup
 
-Requires Linux, user systemd, Python 3, uv, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, ImageMagick, and xdotool. Clipboard commands additionally use xclip; the browser convenience uses helium-browser.
+Requires Linux, user systemd, Python 3, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, ImageMagick, xdotool and the native accessibility dependencies below. Clipboard commands additionally use xclip; the browser convenience uses helium-browser. Optional OCR/icon setup uses uv.
 
 ```bash
 mkdir -p ~/.local/bin
 ln -s "$PWD/scripts/computer_use.py" ~/.local/bin/computer-use
 ln -s "$PWD/scripts/virtual_browser.py" ~/.local/bin/virtual-browser
-computer-use setup-ocr
+computer-use setup-accessibility
 ```
 
-Keep the entire repository directory together: the entry points import sibling modules. For an existing installation, update its directory link or relink both commands to this checkout; copying only the entry-point file is unsupported. `setup-ocr` creates a separate Python 3.12 environment under `~/.local/share/computer-use/ocr-venv` and installs the complete dependency lock and prepares the models selected by the pinned RapidOCR release. Setup can download packages and model weights. Screenshot inference runs locally on CPU; images are never sent to an OCR service. Each desktop starts its own resident worker lazily and owns its cleanup.
+Keep the entire repository directory together: the entry points import sibling modules. For an existing installation, update its directory link or relink both commands to this checkout; copying only the entry-point file is unsupported. The default accessibility mode checks native system dependencies with `setup-accessibility`; see the requirements below. For optional text targets, `setup-ocr` creates a separate Python 3.12 environment under `~/.local/share/computer-use/ocr-venv` and installs the complete dependency lock and prepares the models selected by the pinned RapidOCR release. Setup can download packages and model weights. Screenshot inference runs locally on CPU; images are never sent to an OCR service. Each desktop starts its own resident worker lazily and owns its cleanup.
 
 ## Capture, locate, click
 
@@ -32,39 +32,39 @@ computer-use screenshot demo --output /tmp/after.png
 computer-use stop demo
 ```
 
-Screenshots print only the image path. The recognized text and geometry stay in the owner-only session directory. `query` prints one target as JSON: `ref`, `text`, `confidence`, `bounds`, `center`, and source-image information. Bounds are `[x1, y1, x2, y2]` with exclusive right/bottom edges; center is `[x, y]`, all in original screenshot pixels from the top left. These are OCR text bounds, not whole-control or accessibility bounds.
+Screenshots print only the image path. Target names and geometry stay in the owner-only session directory. `query` prints one target as JSON: `ref`, `text`, `confidence`, `bounds`, `center`, and source-image information. Bounds are `[x1, y1, x2, y2]` with exclusive right/bottom edges; center is `[x, y]`, all in original screenshot pixels from the top left. The default bounds describe accessible controls; `--targets text` returns OCR text bounds instead.
 
-References advance through `@a1`, `@b1`, …, `@g1`, then wrap. A new capture replaces the reference map; all `input`, `exec`, launch/browser, clipboard-set, and click operations invalidate it. Queries do not invalidate it and return cached coordinates; they do not recheck live pixels. Use a fresh screenshot when the app may have changed. A click checks the current pixels within its text box against the captured pixels before sending native input. A changed target rejects the click. Repeated letters are intentionally short visual hints, not globally unique capture IDs: always use the latest image, including after wraparound. Pixels alone cannot distinguish two logically different controls with identical appearance.
+References advance through `@a1`, `@b1`, …, `@g1`, then wrap. A new capture replaces the reference map; all `input`, `exec`, launch/browser, clipboard-set, and click operations invalidate it. Queries do not invalidate it and return cached coordinates; they do not recheck live pixels. Use a fresh screenshot when the app may have changed. A click checks the current pixels within its target bounds against the captured pixels before sending native input; accessibility targets also recheck focus and semantics. A changed target rejects the click. Repeated letters are intentionally short visual hints, not globally unique capture IDs: always use the latest image, including after wraparound. Pixels alone cannot distinguish two logically different controls with identical appearance.
 
-Badges avoid all detected text and other badges. On crowded screens, a gutter is added to the right for labels that cannot fit nearby. The source image stays at its original scale and top-left position; gutter labels still refer to their text boxes in the original screen. Query JSON distinguishes `screen_size` (also available as the legacy `size`) from the rendered `image_size`; the latter is null for snapshots from older workers. Connectors and outlines leave detected text pixels untouched before image encoding.
+Badges avoid detected target regions and other badges. On crowded screens, a gutter is added to the right for labels that cannot fit nearby. The source image stays at its original scale and top-left position; gutter labels still refer to their target bounds in the original screen. Query JSON distinguishes `screen_size` (also available as the legacy `size`) from the rendered `image_size`; the latter is null for snapshots from older workers. Connectors and outlines leave target pixels untouched before image encoding.
 
-For unannotated images or targets that OCR misses:
+For unannotated images or targets the current mode misses:
 
 ```bash
 computer-use screenshot demo --raw --output /tmp/raw.png
 computer-use input demo -- mousemove 450 300 click 1
 ```
 
-Raw capture clears references and does not require OCR. The existing input, clipboard, window, and browser commands remain available. See [SKILL.md](SKILL.md) for the complete desktop workflow and isolation boundaries.
+Raw capture clears references and does not require a target worker. The existing input, clipboard, window, and browser commands remain available. See [SKILL.md](SKILL.md) for the complete desktop workflow and isolation boundaries.
 
 ## Optional icon/button targets
 
-Text-only annotations remain the default. For screens with icon controls, select the separate visual mode:
+Accessibility annotations are the default. For apps with incomplete accessibility support, select OCR text targets with `--targets text` or the separate visual icon mode:
 
-| Default text targets | Optional `--targets icons` |
+| Optional `--targets text` | Optional `--targets icons` |
 |---|---|
-| ![Default text annotations](docs/images/targets.png) | ![Optional visual regions](docs/images/icons.png) |
+| ![OCR text annotations](docs/images/targets.png) | ![Optional visual regions](docs/images/icons.png) |
 
 ```bash
 computer-use setup-icons
 computer-use screenshot demo --targets icons --output /tmp/icons.png
 computer-use query demo @b13
 computer-use click demo @b13
-# The next screenshot returns to text unless explicitly selected again:
-computer-use screenshot demo --output /tmp/text.png
+# The next screenshot returns to accessibility:
+computer-use screenshot demo --output /tmp/controls.png
 ```
 
-Choose references from the current image. Switching modes takes a new screenshot and invalidates all earlier references, using the same a–g sequence and pixel verification. `--targets text` explicitly selects the default; `--raw` and `--targets` cannot be combined. Combined text/icon overlays are not offered.
+Choose references from the current image. Switching modes takes a new screenshot and invalidates all earlier references, using the same a–g sequence and pixel verification. `--targets accessibility` explicitly selects the default; `--raw` and `--targets` cannot be combined. Combined text/icon overlays are not offered.
 
 `setup-icons` installs a separate locked Python environment in `~/.local/share/computer-use/icons-venv`, downloads the 40.6 MB [Microsoft OmniParser v2 icon detector](https://huggingface.co/microsoft/OmniParser-v2.0/tree/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect) at a pinned revision, verifies its SHA-256, and warms the CPU model. The publisher licenses these weights under AGPL-3.0; see the [model license](https://huggingface.co/microsoft/OmniParser-v2.0/blob/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect/LICENSE). Text mode requires none of these packages. Icon screenshots do not run OCR or generate icon captions, and neither mode uploads screenshots.
 
@@ -72,23 +72,21 @@ Visual mode detects at the screenshot's full size (with model stride padding) an
 
 ## Native accessibility targets
 
-Use the app's accessibility roles and names to locate icon buttons and other controls. Text remains the screenshot default; accessibility is explicit:
+Use the app's accessibility roles and names to locate icon buttons and other controls. New desktops enable the private accessibility bus and screenshots use accessibility targets by default:
 
 ```bash
 computer-use setup-accessibility
-computer-use start accessible-demo --accessibility
+computer-use start accessible-demo
 computer-use browser accessible-demo --no-cdp --url https://example.com
-computer-use screenshot accessible-demo --targets accessibility --output /tmp/controls.png
+computer-use screenshot accessible-demo --output /tmp/controls.png
 # Choose the reference from this image:
 computer-use query accessible-demo @a13
 computer-use click accessible-demo @a13
 ```
 
-The browser shortcut also accepts `virtual-browser start accessible-demo --accessibility --no-cdp --url https://example.com`. On an existing session, `launch --accessibility` or `browser --accessibility` enables the bus for that launch and future launches. Existing apps must be relaunched to acquire the new environment. The browser helper enables Chromium's native accessibility bridge and renderer support; when launching Chromium yourself with `launch`, additionally pass `--force-renderer-accessibility=complete`.
+The browser shortcut also accepts `virtual-browser start accessible-demo --no-cdp --url https://example.com`. On an existing session, `launch --accessibility` or `browser --accessibility` enables the bus for that launch and future launches. Existing apps must be relaunched to acquire the new environment. The browser helper enables Chromium's native accessibility bridge and renderer support; when launching Chromium yourself with `launch`, additionally pass `--force-renderer-accessibility=complete`.
 
-| Text targets (default) | Accessibility targets |
-|---|---|
-| ![OCR on icon buttons](docs/images/accessibility-text.png) | ![Native accessible controls](docs/images/accessibility.png) |
+Use `computer-use start NAME --no-accessibility` for a desktop without the native accessibility dependencies, then select `--targets text`, `--targets icons` or `--raw` explicitly. Existing desktops without a private bus need `launch --accessibility` or `browser --accessibility` and an app relaunch before using the new screenshot default. Screenshot modes do not fall back silently.
 
 `setup-accessibility` checks dependencies without installing packages: `/usr/bin/python3` needs PyGObject, AT-SPI introspection and Pillow, alongside `at-spi2-core`, `dbus-daemon`, `busctl`, `xdotool` and libX11. On Arch the Python packages are `python-gobject` and `python-pillow`. This mode needs neither the OCR runtime nor the icon model. Each enabled session owns a private accessibility bus, registry and rendering worker. Each capture or click verification uses a fresh native reader with an eight-second timeout so libatspi cannot retain destroyed objects across reads. Host portal and accessibility access remain excluded from the filtered session bus.
 

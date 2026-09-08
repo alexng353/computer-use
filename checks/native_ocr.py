@@ -116,7 +116,14 @@ def main(directory):
         return json.loads((session_dir / "ocr-snapshot.json").read_text())
 
     def capture():
-        command("screenshot", name, "--output", str(directory / "targets.png"))
+        command(
+            "screenshot",
+            name,
+            "--targets",
+            "text",
+            "--output",
+            str(directory / "targets.png"),
+        )
         return snapshot()
 
     def read_target(data, text):
@@ -142,7 +149,7 @@ def main(directory):
             return False
 
     try:
-        command("start", name, "--size", "1000x700")
+        command("start", name, "--size", "1000x700", "--no-accessibility")
         command(
             "launch",
             name,
@@ -212,7 +219,13 @@ def main(directory):
         assert module.load(name)["units"].count(unit) == 1
         (session_dir / "ocr-generation.json").write_text("{")
         failed = command(
-            "screenshot", name, "--output", str(directory / "bad.png"), ok=False
+            "screenshot",
+            name,
+            "--targets",
+            "text",
+            "--output",
+            str(directory / "bad.png"),
+            ok=False,
         )
         assert "Traceback" not in failed.stderr
         command("stop", name)
@@ -223,7 +236,7 @@ def main(directory):
             ("input", name, "--", "search", "--sync", "--name", "__never__"),
             ("exec", name, "--", sys.executable, "-c", "import signal; signal.pause()"),
         ):
-            command("start", name, "--size", "800x600")
+            command("start", name, "--size", "800x600", "--no-accessibility")
             process = pending_input(*args)
             wait_until(lock_busy, "pending command lock")
             command("stop", name, timeout=5)
@@ -232,7 +245,7 @@ def main(directory):
             assert not session_dir.exists()
         print("PASS stop cancels blocked input and exec", flush=True)
 
-        command("start", name, "--size", "800x600")
+        command("start", name, "--size", "800x600", "--no-accessibility")
         child_ready = directory / "child.pid"
         child_code = (
             "import os, signal, sys\n"
@@ -263,7 +276,7 @@ def main(directory):
             "PASS stop kills TERM-resistant descendant after leader exits", flush=True
         )
 
-        command("start", name, "--size", "800x600")
+        command("start", name, "--size", "800x600", "--no-accessibility")
         old_state = module.load(name)
         # Hold the name lock while deliberately replacing its session. An old
         # queued stop must retain its original identity after acquiring the lock.
@@ -271,7 +284,7 @@ def main(directory):
             process = pending_input("stop", name)
             wait_until(lambda: module.stop_marker(old_state).exists(), "queued stop")
             module.stop(old_state)
-            replacement = module.start(name, "800x600")
+            replacement = module.start(name, "800x600", accessibility=False)
         _, error = process.communicate(timeout=5)
         assert process.returncode != 0 and "replaced" in error, error
         assert module.load(name)["prefix"] == replacement["prefix"]

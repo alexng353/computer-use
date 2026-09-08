@@ -40,14 +40,13 @@ def main(directory):
     fixture = directory / "fixture.html"
     fixture.write_text(HTML)
 
-    def capture(mode="accessibility"):
+    def capture(mode=None):
         command(
             "screenshot",
             name,
-            "--targets",
-            mode,
+            *(["--targets", mode] if mode else []),
             "--output",
-            str(directory / f"{mode}.png"),
+            str(directory / f"{mode or 'default'}.png"),
         )
         return json.loads((session_dir / "ocr-snapshot.json").read_text())
 
@@ -59,7 +58,7 @@ def main(directory):
         )
 
     try:
-        command("start", name, "--size", "1000x700", "--accessibility")
+        command("start", name, "--size", "1000x700")
         app = json.loads(
             command("browser", name, "--no-cdp", "--url", fixture.as_uri()).stdout
         )

@@ -18,7 +18,11 @@ import ocr_worker
 
 parser = computer_use.parser()
 args = parser.parse_args(["screenshot", "demo", "--output", "/tmp/demo.png"])
-assert getattr(args, "targets", None) == "text", "Default screenshots must select text"
+assert getattr(args, "targets", None) == "accessibility"
+args = parser.parse_args(
+    ["screenshot", "demo", "--targets", "text", "--output", "/tmp/demo.png"]
+)
+assert args.targets == "text"
 args = parser.parse_args(
     ["screenshot", "demo", "--targets", "icons", "--output", "/tmp/demo.png"]
 )
@@ -35,7 +39,9 @@ for flags in (["--targets", "combined"], ["--raw", "--targets", "icons"]):
             raise AssertionError(f"Invalid mode accepted: {flags}")
 assert parser.parse_args(["setup-icons"]).action == "setup-icons"
 assert "torch" not in sys.modules and "ultralytics" not in sys.modules
-print("PASS text default, explicit icons, incompatible flags and optional imports")
+print(
+    "PASS accessibility default, explicit fallbacks, incompatible flags and optional imports"
+)
 
 assert "torch" not in sys.modules and "ultralytics" not in sys.modules
 targets = icon_detector.targets_from_detections(
