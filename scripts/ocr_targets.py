@@ -1,24 +1,17 @@
 """Screenshot references and the private, session-owned OCR worker client."""
 
-import fcntl
 import json
+import os
 import re
 import socket
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 RUNTIME = Path.home() / ".local/share/computer-use/ocr-venv"
 SCRIPTS = Path(__file__).resolve().parent
-
-
-@contextmanager
-def interaction_lock(state):
-    with (Path(state["directory"]) / "interaction.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+PREFIXES = "abcdefg"
 
 
 def invalidate(state):
@@ -33,11 +26,10 @@ def setup():
         [
             "uv",
             "pip",
-            "install",
+            "sync",
             "--python",
             str(RUNTIME / "bin/python"),
-            "-r",
-            str(SCRIPTS / "ocr-requirements.txt"),
+            str(SCRIPTS / "ocr-requirements.lock"),
         ],
         check=True,
     )
@@ -61,6 +53,10 @@ def request(state, message, timeout=60):
 
 
 def ensure_worker(state, start_service):
+    if len(os.fsencode(Path(state["directory"]) / "ocr.sock")) >= 108:
+        raise RuntimeError(
+            "Session path is too long for the OCR socket; use a shorter name or --raw"
+        )
     try:
         request(state, {"action": "ping"}, timeout=1)
         return
@@ -121,7 +117,7 @@ def screenshot(state, output, capture, start_service, raw=False):
     counter = directory / "ocr-generation.json"
     generation = json.loads(counter.read_text()) + 1 if counter.exists() else 0
     atomic_json(counter, generation)
-    prefix = "abcdefg"[generation % 7]
+    prefix = PREFIXES[generation % len(PREFIXES)]
     source = directory / "ocr-screen.png"
     capture(source)
     result = request(
@@ -136,7 +132,6 @@ def screenshot(state, output, capture, start_service, raw=False):
     atomic_json(
         directory / "ocr-snapshot.json",
         {
-            "generation": generation,
             "prefix": prefix,
             "source": str(source),
             "image": str(output),
@@ -146,7 +141,7 @@ def screenshot(state, output, capture, start_service, raw=False):
 
 
 def query(state, reference):
-    if not re.fullmatch(r"@?[a-g][1-9][0-9]*", reference):
+    if not re.fullmatch(rf"@?[{PREFIXES}][1-9][0-9]*", reference):
         raise RuntimeError("Use a screenshot reference such as @a13")
     path = Path(state["directory"]) / "ocr-snapshot.json"
     if not path.exists():
@@ -155,6 +150,8 @@ def query(state, reference):
         )
     snapshot = json.loads(path.read_text())
     reference = reference.removeprefix("@")
+    if reference[0] != snapshot["prefix"]:
+        raise RuntimeError(f"Stale reference @{reference}; use the current screenshot")
     target = next(
         (item for item in snapshot["targets"] if item["ref"] == reference), None
     )
