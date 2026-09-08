@@ -202,7 +202,7 @@ def stop(state, remove=True):
         shutil.rmtree(state["directory"])
 
 
-def start(name, size, accessibility=False):
+def start(name, size, accessibility=True):
     require("Xvfb", "xauth", "xdpyinfo", "systemd-run", "xdg-dbus-proxy")
     if not re.fullmatch(r"[1-9][0-9]{2,3}x[1-9][0-9]{2,3}", size):
         raise RuntimeError("--size must be WIDTHxHEIGHT, from 100 to 9999 pixels")
@@ -496,8 +496,9 @@ def parser():
             sub.add_argument("--size", default="1440x1000")
             sub.add_argument(
                 "--accessibility",
-                action="store_true",
-                help="Enable a private accessibility bus for this session",
+                action=argparse.BooleanOptionalAction,
+                default=True,
+                help="Enable a private accessibility bus for this session (default: enabled)",
             )
         elif action in ["launch", "browser"]:
             sub.add_argument(
@@ -528,8 +529,8 @@ def parser():
             capture_mode.add_argument(
                 "--targets",
                 choices=["text", "icons", "accessibility"],
-                default="text",
-                help="Annotation targets (default: text)",
+                default="accessibility",
+                help="Annotation targets (default: accessibility)",
             )
         elif action in ["click", "query"]:
             sub.add_argument(

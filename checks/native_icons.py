@@ -22,14 +22,14 @@ def main(directory):
     name = "check-icons-" + secrets.token_hex(4)
     session_dir = STATE / name
 
-    def capture(mode=None):
-        args = ["--targets", mode] if mode else []
+    def capture(mode):
         command(
             "screenshot",
             name,
-            *args,
+            "--targets",
+            mode,
             "--output",
-            str(directory / f"{mode or 'default'}.png"),
+            str(directory / f"{mode}.png"),
         )
         return json.loads((session_dir / "ocr-snapshot.json").read_text())
 
@@ -49,7 +49,7 @@ def main(directory):
         )
 
     try:
-        command("start", name, "--size", "1000x700")
+        command("start", name, "--size", "1000x700", "--no-accessibility")
         command(
             "launch",
             name,
@@ -64,7 +64,7 @@ def main(directory):
         wait_until(
             lambda: json.loads(command("windows", name).stdout), "fixture window"
         )
-        text = capture()
+        text = capture("text")
         assert text["target_mode"] == "text"
         save = next(target for target in text["targets"] if target["text"] == "Save")
         icons = capture("icons")
@@ -100,11 +100,11 @@ def main(directory):
         assert "pixels changed" in rejected.stderr
         assert not (session_dir / "ocr-snapshot.json").exists()
         icons = capture("icons")
-        default = capture()
-        assert default["target_mode"] == "text"
+        text = capture("text")
+        assert text["target_mode"] == "text"
         command("query", name, "@" + icons["targets"][0]["ref"], ok=False)
         print(
-            "PASS icon redraw rejection and return to default text invalidates icon refs",
+            "PASS icon redraw rejection and explicit text fallback invalidates icon refs",
             flush=True,
         )
 
