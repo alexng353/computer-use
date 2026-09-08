@@ -10,7 +10,9 @@ import importlib.util
 import json
 import os
 import secrets
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -104,6 +106,7 @@ def main(directory):
     name = "check-ocr-" + secrets.token_hex(4)
     session_dir = STATE / name
     running = []
+    child_handles = []
     sys.path.insert(0, str(CLI.parent))
     spec = importlib.util.spec_from_file_location("computer_use", CLI)
     module = importlib.util.module_from_spec(spec)
@@ -228,6 +231,37 @@ def main(directory):
         print("PASS stop cancels blocked input and exec", flush=True)
 
         command("start", name, "--size", "800x600")
+        child_ready = directory / "child.pid"
+        child_code = (
+            "import os, signal, sys\n"
+            "from pathlib import Path\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "signal.pause()\n"
+        )
+        parent_code = (
+            "import signal, subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}, sys.argv[1]])\n"
+            "signal.pause()\n"
+        )
+        process = pending_input(
+            "exec", name, "--", sys.executable, "-c", parent_code, str(child_ready)
+        )
+        wait_until(
+            lambda: child_ready.exists() and child_ready.read_text().isdigit(),
+            "TERM-resistant descendant",
+        )
+        child_handle = os.pidfd_open(int(child_ready.read_text()))
+        child_handles.append(child_handle)
+        command("stop", name, timeout=5)
+        assert select.select([child_handle], [], [], 2)[0], "Descendant survived stop"
+        _, error = process.communicate(timeout=5)
+        assert process.returncode != 0 and "cancelled" in error, error
+        print(
+            "PASS stop kills TERM-resistant descendant after leader exits", flush=True
+        )
+
+        command("start", name, "--size", "800x600")
         old_state = module.load(name)
         # Hold the name lock while deliberately replacing its session. An old
         # queued stop must retain its original identity after acquiring the lock.
@@ -245,6 +279,12 @@ def main(directory):
         command("stop", name)
         print("PASS queued stop rejects replacement session; empty screen", flush=True)
     finally:
+        for child_handle in child_handles:
+            try:
+                signal.pidfd_send_signal(child_handle, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.close(child_handle)
         for process in running:
             if process.poll() is None:
                 process.terminate()

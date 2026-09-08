@@ -103,6 +103,7 @@ def run_interruptible(state, command, env):
     previous = signal.signal(signal.SIGTERM, interrupted)
     try:
         with subprocess.Popen(command, env=env, start_new_session=True) as process:
+            completed = False
             try:
                 while True:
                     if stop_marker(state).exists():
@@ -110,20 +111,34 @@ def run_interruptible(state, command, env):
                             "Command cancelled because the session is stopping"
                         )
                     try:
-                        return process.wait(timeout=0.1)
+                        result = process.wait(timeout=0.1)
+                        completed = True
+                        return result
                     except subprocess.TimeoutExpired:
                         continue
             finally:
-                if process.poll() is None:
+                if not completed:
                     try:
                         os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError:
                         pass
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                    # The leader can exit before a descendant that ignores TERM.
+                    # Keep the grace period and escalation tied to the group.
+                    deadline = time.monotonic() + 2
+                    while True:
+                        process.poll()
+                        try:
+                            os.killpg(process.pid, 0)
+                        except ProcessLookupError:
+                            break
+                        if time.monotonic() >= deadline:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            break
+                        time.sleep(0.02)
+                    process.wait()
     finally:
         signal.signal(signal.SIGTERM, previous)
 
