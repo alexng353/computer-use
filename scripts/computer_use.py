@@ -538,6 +538,8 @@ def perform(state, args, command):
                     **target,
                     "image": snapshot["image"],
                     "size": snapshot["size"],
+                    "screen_size": snapshot["size"],
+                    "image_size": snapshot.get("image_size"),
                     "coordinate_origin": "top-left",
                     "bounds_format": "x1,y1,x2,y2 (exclusive end)",
                 },
