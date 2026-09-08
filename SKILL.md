@@ -44,6 +44,8 @@ Read the letter-number badge on the current image before choosing a reference. `
 
 After clicking, typing, scrolling, launching an app, or another `input`/`exec` command, take a fresh screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. A background redraw within the target box also rejects a click and requires recapture.
 
+On crowded screens, badges may use an added gutter on the right. The original screen stays at its original scale and top-left position. Gutter pixels are not desktop coordinates; use `query` or `click` with the badge reference to target its original text box.
+
 For unannotated inspection, use `screenshot ... --raw`; this clears current references. For icons and other uncovered targets, inspect the current screenshot and use native coordinates below. Window IDs come from the session's window list.
 
 ```bash
