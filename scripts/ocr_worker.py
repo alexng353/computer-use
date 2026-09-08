@@ -29,47 +29,116 @@ def overlap(a, b):
     )
 
 
+def badge_layout(size, targets, widths):
+    image_width, image_height = size
+    height, gap = 20, 4
+    protected = [
+        (x1 - 2, y1 - 2, x2 + 2, y2 + 2)
+        for x1, y1, x2, y2 in (item["bounds"] for item in targets)
+    ]
+    occupied = []
+    badges = []
+    overflow = 0
+    rows = max(1, (image_height - 16) // (height + gap))
+    column_width = max(widths, default=0) + 16
+    for target, width in zip(targets, widths, strict=True):
+        x1, y1, x2, y2 = target["bounds"]
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        anchors = [
+            (x, y)
+            for x in (x1, cx - width // 2, x2 - width)
+            for y in (y1 - height - gap, y2 + gap)
+        ] + [(x1 - width - gap, cy - height // 2), (x2 + gap, cy - height // 2)]
+        candidates = set()
+        if width <= image_width and height <= image_height:
+            for offset in range(0, 65, 8):
+                for dx, dy in ((offset, 0), (-offset, 0), (0, offset), (0, -offset)):
+                    for x, y in anchors:
+                        x = max(0, min(x + dx, image_width - width))
+                        y = max(0, min(y + dy, image_height - height))
+                        candidates.add((x, y, x + width, y + height))
+
+        def distance(box, bounds=target["bounds"]):
+            x1, y1, x2, y2 = bounds
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            horizontal = max(x1 - box[2], box[0] - x2, 0)
+            vertical = max(y1 - box[3], box[1] - y2, 0)
+            return (
+                horizontal**2 + vertical**2,
+                ((box[0] + box[2]) / 2 - cx) ** 2 + ((box[1] + box[3]) / 2 - cy) ** 2,
+                box,
+            )
+
+        badge = next(
+            (
+                box
+                for box in sorted(candidates, key=distance)
+                if not any(overlap(box, obstacle) for obstacle in protected + occupied)
+            ),
+            None,
+        )
+        if badge is None:
+            # Dense screens still need every reference, without covering the UI.
+            column, row = divmod(overflow, rows)
+            x, y = image_width + 8 + column * column_width, 8 + row * (height + gap)
+            badge = (x, y, x + width, y + height)
+            overflow += 1
+        badges.append(badge)
+        left, top, right, bottom = badge
+        occupied.append((left - 2, top - 2, right + 2, bottom + 2))
+    columns = math.ceil(overflow / rows)
+    return badges, (
+        image_width + columns * column_width,
+        max(image_height, height + 16) if overflow else image_height,
+    )
+
+
 def annotate(image, targets, output):
-    draw = ImageDraw.Draw(image)
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 14)
     except OSError:
         font = ImageFont.load_default(size=14)
-    occupied = []
-    text_bounds = [item["bounds"] for item in targets]
-    for target in targets:
+    measuring = ImageDraw.Draw(image)
+    widths = [
+        math.ceil(measuring.textlength(item["ref"], font=font)) + 8 for item in targets
+    ]
+    badges, size = badge_layout(image.size, targets, widths)
+    canvas = Image.new("RGB", size, "#111827")
+    canvas.paste(image)
+    draw = ImageDraw.Draw(canvas)
+    for target, badge in zip(targets, badges, strict=True):
         x1, y1, x2, y2 = target["bounds"]
-        label = target["ref"]
-        width = math.ceil(draw.textlength(label, font=font)) + 8
-        height = 20
-        candidates = []
-        for x, y in (
-            (x2 + 2, y1 - height),
-            (x1, y1 - height),
-            (x2 + 2, y1),
-            (x1, y2 + 2),
-        ):
-            x = max(0, min(x, image.width - width))
-            y = max(0, min(y, image.height - height))
-            candidate = (x, y, x + width, y + height)
-            penalty = sum(overlap(candidate, box) for box in text_bounds)
-            penalty += 3 * sum(overlap(candidate, box) for box in occupied)
-            candidates.append((penalty, candidate))
-        badge = min(candidates, key=lambda candidate: candidate[0])[1]
-        occupied.append(badge)
-        draw.rectangle((x1, y1, x2 - 1, y2 - 1), outline="#34d399", width=2)
+        draw.rectangle((x1 - 2, y1 - 2, x2 + 1, y2 + 1), outline="#34d399", width=1)
         draw.line(
-            (x2 - 1, y1, badge[0], badge[1] + height / 2), fill="#34d399", width=1
+            (
+                (x1 + x2) // 2,
+                (y1 + y2) // 2,
+                (badge[0] + badge[2]) // 2,
+                (badge[1] + badge[3]) // 2,
+            ),
+            fill="#34d399",
+            width=1,
         )
-        draw.rectangle(badge, fill="#111827", outline="#fde047", width=1)
-        draw.text((badge[0] + 4, badge[1] + 2), label, font=font, fill="#fde047")
+    # Connectors and neighbouring outlines must not alter any detected text.
+    for target in targets:
+        bounds = target["bounds"]
+        canvas.paste(image.crop(bounds), bounds[:2])
+    for target, badge in zip(targets, badges, strict=True):
+        left, top, right, bottom = badge
+        draw.rectangle(
+            (left, top, right - 1, bottom - 1),
+            fill="#111827",
+            outline="#fde047",
+            width=1,
+        )
+        draw.text((left + 4, top + 2), target["ref"], font=font, fill="#fde047")
     # Publish only a complete preview; screenshots retain the caller's file format.
     with tempfile.NamedTemporaryFile(
         dir=output.parent, suffix=output.suffix, delete=False
     ) as temporary:
         path = Path(temporary.name)
     try:
-        image.save(path)
+        canvas.save(path)
         path.replace(output)
     finally:
         path.unlink(missing_ok=True)
