@@ -33,6 +33,21 @@ def require(*commands):
             raise RuntimeError(f"Missing dependency: {command}")
 
 
+def configure_session_environment():
+    # Agent shells can omit login variables while the user's manager is running.
+    runtime = Path(f"/run/user/{os.getuid()}")
+    bus = runtime / "bus"
+    if (
+        runtime.is_dir()
+        and runtime.stat().st_uid == os.getuid()
+        and bus.is_socket()
+        and bus.stat().st_uid == os.getuid()
+    ):
+        os.environ.setdefault("XDG_RUNTIME_DIR", str(runtime))
+        if os.environ["XDG_RUNTIME_DIR"] == str(runtime):
+            os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={bus}")
+
+
 def identifier(value):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", value):
         raise argparse.ArgumentTypeError(
@@ -542,6 +557,7 @@ def parser():
 
 
 def main():
+    configure_session_environment()
     os.umask(0o077)
     argv = sys.argv[1:]
     command = []

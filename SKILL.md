@@ -5,9 +5,40 @@ description: Operate native Linux apps and browsers on an isolated virtual deskt
 
 # Computer use
 
+## First-use setup
+
+Before starting the first desktop in a task, run the bundled setup script. Resolve
+`<skill-directory>` from the location of this `SKILL.md`, including when installed
+by `npx skills`; it is independent of the task's working directory.
+
+```bash
+python3 "<skill-directory>/scripts/setup.py"
+```
+
+Setup checks the Linux dependencies, links both commands into `~/.local/bin`, and
+verifies a temporary desktop's screenshot, native input, clipboard, and cleanup.
+Continue only after it exits successfully with `"ready": true`. Use the returned
+absolute command paths, or apply its printed `PATH` export to subsequent commands.
+Repeat setup after moving or updating the installed skill.
+
+If setup reports an existing command conflict, preserve that command and rerun
+with `--bin-dir ~/.local/share/computer-use/bin`; use the returned absolute paths
+for this task. Setup can be rerun safely and never replaces another installation.
+If dependencies are missing, identify the packages for the user's distribution
+and request approval only for privileged system installation when it is not
+already authorized. Rerun setup after installation. A missing user systemd manager
+requires a Linux login session with user systemd and D-Bus; report that prerequisite
+instead of attempting to operate the visible desktop. `--check` checks dependencies
+without installing commands or starting a desktop; it does not verify desktop operation.
+
+The browser convenience requires `helium-browser`. Install it only when browser
+work needs that helper; native apps do not require a browser. OCR and icon runtimes
+are optional: run their setup commands only when using those targeting modes.
+Keep the skill directory intact because the helpers import sibling modules.
+
 Use a separate Xvfb desktop for GUI work. Prefer an app's supported API or CLI when it can complete the task directly; use screenshots, accessibility targets and native input for app and browser UI. Use agent-browser/CDP when the task benefits from DOM access and permits browser instrumentation.
 
-The global `computer-use` command is on PATH. It creates owner-only session files under `~/.local/state/computer-use/<name>` and manages Xvfb, a filtered D-Bus proxy, and launched apps as separate user systemd services. `virtual-browser` is a shortcut for starting a desktop with Helium already attached.
+Use the `computer-use` command installed by setup. It creates owner-only session files under `~/.local/state/computer-use/<name>` and manages Xvfb, a filtered D-Bus proxy, and launched apps as separate user systemd services. `virtual-browser` is a shortcut for starting a desktop with Helium already attached.
 
 This separates display, input, clipboard, and temporary browser profiles. Apps still share Alex's filesystem, network, and audio services. It does not authorize extra account changes, communications, or purchases.
 

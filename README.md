@@ -6,18 +6,53 @@ Native X11 desktop automation on a private virtual display, with native accessib
 |---|---|
 | ![OCR on icon buttons](docs/images/accessibility-text.png) | ![Native accessible controls](docs/images/accessibility.png) |
 
-## Setup
-
-Requires Linux, user systemd, Python 3, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, ImageMagick, xdotool and the native accessibility dependencies below. Clipboard commands additionally use xclip; the browser convenience uses helium-browser. Optional OCR/icon setup uses uv.
+## Install the skill
 
 ```bash
-mkdir -p ~/.local/bin
-ln -s "$PWD/scripts/computer_use.py" ~/.local/bin/computer-use
-ln -s "$PWD/scripts/virtual_browser.py" ~/.local/bin/virtual-browser
-computer-use setup-accessibility
+npx skills add alexng353/computer-use
 ```
 
-Keep the entire repository directory together: the entry points import sibling modules. For an existing installation, update its directory link or relink both commands to this checkout; copying only the entry-point file is unsupported. The default accessibility mode checks native system dependencies with `setup-accessibility`; see the requirements below. For optional text targets, `setup-ocr` creates a separate Python 3.12 environment under `~/.local/share/computer-use/ocr-venv` and installs the complete dependency lock and prepares the models selected by the pinned RapidOCR release. Setup can download packages and model weights. Screenshot inference runs locally on CPU; images are never sent to an OCR service. Each desktop starts its own resident worker lazily and owns its cleanup.
+Then ask your agent to use the `computer-use` skill. On first use, the agent runs
+its bundled setup script, installs user-local command links, and verifies a
+private desktop before continuing. The skill installer copies the skill and its
+supporting files; it does not run setup or install system packages itself.
+
+## Setup
+
+Requires Linux, a running user systemd manager and session D-Bus, Python 3, Xvfb,
+xauth, xdpyinfo, xdg-dbus-proxy, ImageMagick 7 (`magick`), xdotool, xclip and the
+native accessibility dependencies below. The browser convenience additionally
+requires helium-browser. Optional OCR/icon setup uses uv.
+
+For manual setup, run this from the repository or installed skill directory:
+
+```bash
+python3 scripts/setup.py
+```
+
+Setup preserves existing commands and creates links in `~/.local/bin`. It checks
+accessibility dependencies and verifies a disposable 640×480 desktop, PNG capture,
+native pointer input, virtual clipboard round trip, and session cleanup. It reports
+`"ready": true` only after those checks pass. It does not install system packages,
+download models, or edit shell configuration. Apply the printed `PATH` export for
+the current shell or use the returned absolute command paths.
+
+Use `--bin-dir /absolute/path` for another command directory. If existing command
+names belong to another installation, use a different directory; setup refuses to
+overwrite them. Reruns are safe. Run setup again after moving or updating the skill.
+`python3 scripts/setup.py --check` checks dependencies without installing commands
+or starting a desktop. A failed smoke check returns nonzero; command links may
+already exist, so rerun setup after resolving the reported problem.
+
+Keep the entire skill directory together: the entry points import sibling modules.
+For optional text targets, `computer-use setup-ocr` creates a separate Python 3.12
+environment under `~/.local/share/computer-use/ocr-venv`, installs the locked
+dependencies, and prepares the pinned RapidOCR models. Icon setup is separate.
+Inference runs locally on CPU; images are never sent to an OCR service.
+
+The Codex app's built-in live viewer is not part of this repository. This skill
+provides desktop control and screenshot files; installing it does not add that
+viewer to another agent or application.
 
 ## Capture, locate, click
 
@@ -121,6 +156,8 @@ The native check additionally requires tkinter and an active user systemd bus. I
 To update the resolved dependency set, run `uv pip compile scripts/ocr-requirements.txt --python-version 3.12 --no-header --no-annotate -o scripts/ocr-requirements.lock`, then run setup and both checks.
 
 For the optional icon runtime, use `uv pip compile scripts/icon-requirements.txt --python-version 3.12 --torch-backend cpu --no-header --no-annotate -o scripts/icon-requirements.lock`, then rerun `setup-icons` and `checks/native_icons.py`. `setup-icons` explicitly requests CPU PyTorch wheels when syncing this lock.
+
+Bootstrap contract checks: `python checks/setup_contracts.py`. Run the setup script itself for the real desktop smoke check.
 
 ## License
 
