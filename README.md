@@ -121,3 +121,7 @@ The native check additionally requires tkinter and an active user systemd bus. I
 To update the resolved dependency set, run `uv pip compile scripts/ocr-requirements.txt --python-version 3.12 --no-header --no-annotate -o scripts/ocr-requirements.lock`, then run setup and both checks.
 
 For the optional icon runtime, use `uv pip compile scripts/icon-requirements.txt --python-version 3.12 --torch-backend cpu --no-header --no-annotate -o scripts/icon-requirements.lock`, then rerun `setup-icons` and `checks/native_icons.py`. `setup-icons` explicitly requests CPU PyTorch wheels when syncing this lock.
+
+## License
+
+Licensed under the [GNU General Public License v3.0](LICENSE) (GPL-3.0-only). Third-party dependencies and model weights retain their respective licenses.
