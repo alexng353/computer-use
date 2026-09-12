@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
@@ -355,6 +356,41 @@ def launch(state, app_id, command):
     return state["apps"][app_id]
 
 
+def viewer(state):
+    require("ffmpeg", "xdotool")
+    directory = Path(state["directory"])
+    info = directory / "viewer-info.json"
+    if "viewer" not in state["apps"]:
+        launch(
+            state,
+            "viewer",
+            [
+                sys.executable,
+                str(Path(__file__).resolve().with_name("live_view.py")),
+                str(directory),
+            ],
+        )
+    app = state["apps"]["viewer"]
+
+    def ready():
+        if not active(app["unit"]):
+            raise RuntimeError(
+                "Viewer stopped; inspect its service log and recreate the session"
+            )
+        try:
+            details = json.loads(info.read_text())
+            with urllib.request.urlopen(
+                details["url"] + "frame", timeout=2
+            ) as response:
+                if response.read(2) == b"\xff\xd8":
+                    return {**app, **details}
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            return None
+        return None
+
+    return poll(ready, "Viewer did not produce a frame; inspect its service log")
+
+
 def native_browser_command():
     # Distribution wrappers may inject debugging flags from user/system config.
     # Native mode invokes the packaged ELF binary with only the requested flags.
@@ -497,6 +533,7 @@ def parser():
         "stop",
         "launch",
         "browser",
+        "viewer",
         "exec",
         "input",
         "screenshot",
@@ -644,6 +681,8 @@ def perform(state, args, command):
         print(json.dumps(launch(state, args.id, command), indent=2))
     elif args.action == "browser":
         print(json.dumps(browser(state, args), indent=2))
+    elif args.action == "viewer":
+        print(json.dumps(viewer(state), indent=2))
     elif args.action in ["exec", "input"]:
         if args.action == "input":
             command = ["xdotool", *command]

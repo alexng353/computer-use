@@ -22,7 +22,7 @@ supporting files; it does not run setup or install system packages itself.
 Requires Linux, a running user systemd manager and session D-Bus, Python 3, Xvfb,
 xauth, xdpyinfo, xdg-dbus-proxy, ImageMagick 7 (`magick`), xdotool, xclip and the
 native accessibility dependencies below. The browser convenience additionally
-requires helium-browser. Optional OCR/icon setup uses uv.
+requires helium-browser, and the live viewer uses ffmpeg. Optional OCR/icon setup uses uv.
 
 For manual setup, run this from the repository or installed skill directory:
 
@@ -50,9 +50,26 @@ environment under `~/.local/share/computer-use/ocr-venv`, installs the locked
 dependencies, and prepares the pinned RapidOCR models. Icon setup is separate.
 Inference runs locally on CPU; images are never sent to an OCR service.
 
-The Codex app's built-in live viewer is not part of this repository. This skill
-provides desktop control and screenshot files; installing it does not add that
-viewer to another agent or application.
+## Live viewer
+
+The local viewer used in Codex's browser panel is included. It also works in a
+regular browser on the same machine. It requires `ffmpeg` in addition to the base
+dependencies; setup reports it as optional.
+
+```bash
+computer-use start demo
+computer-use viewer demo
+```
+
+Open the returned `http://127.0.0.1:PORT/` URL in a browser or Codex browser panel.
+The viewer refreshes at up to six frames per second, shows the virtual cursor, and
+has a pause button. It is read only; send input through `computer-use` commands.
+It listens only on loopback and rejects foreign Host and cross-site browser
+requests. Repeating `viewer` returns the existing URL. `computer-use stop demo`
+stops the viewer and capture process with the desktop and removes temporary frames.
+
+This packages the existing viewer from the Facebook Marketplace skill; it does
+not depend on that skill or on Codex's internal APIs.
 
 ## Capture, locate, click
 
@@ -157,7 +174,7 @@ To update the resolved dependency set, run `uv pip compile scripts/ocr-requireme
 
 For the optional icon runtime, use `uv pip compile scripts/icon-requirements.txt --python-version 3.12 --torch-backend cpu --no-header --no-annotate -o scripts/icon-requirements.lock`, then rerun `setup-icons` and `checks/native_icons.py`. `setup-icons` explicitly requests CPU PyTorch wheels when syncing this lock.
 
-Bootstrap contract checks: `python checks/setup_contracts.py`. Run the setup script itself for the real desktop smoke check.
+Bootstrap contract checks: `python checks/setup_contracts.py`. Run the setup script itself for the real desktop smoke check. `python checks/native_viewer.py` verifies live viewer frames, cursor updates, request filtering, and cleanup.
 
 ## License
 

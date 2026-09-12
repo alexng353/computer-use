@@ -136,6 +136,25 @@ virtual-browser start research-task --no-cdp --url https://example.com
 
 Both commands use the same session registry. `computer-use status`, `screenshot`, and `stop` work with sessions created by either command.
 
+## Live viewer
+
+When the user wants to watch the virtual desktop, run `computer-use viewer NAME`.
+If it reports missing `ffmpeg`, install the appropriate distribution package within
+the user's authorization and retry. The viewer is optional for desktop control.
+The command returns JSON with its local `url` after the first captured frame is
+ready. Repeating the command for that desktop returns the same viewer.
+
+Open the URL in the user's browser. In Codex, use `open_in_codex` with a browser
+target and the returned URL when that tool is available. Otherwise provide the
+URL for a browser on the same machine. This is the bundled local viewer; it needs
+no private Codex integration. The viewer is read only and has a pause button.
+Continue driving the desktop through the helper's input commands. The stream has
+no target badges: use annotated screenshots to choose reference targets.
+
+The server binds to `127.0.0.1`; keep it local. The viewer and its ffmpeg capture
+are owned by the desktop and stop with `computer-use stop NAME`. Never reuse a
+viewer's old URL for a newly created desktop; obtain its new URL from the helper.
+
 ## Isolation and cleanup
 
 The filtered D-Bus proxy denies the host desktop portal and notification service while permitting existing keyrings. Without it, a native file picker can escape onto the physical desktop even when the app uses Xvfb. Keep the proxy in place. If the keyring requires unlocking, request the missing user interaction; do not drive a prompt on the visible desktop.

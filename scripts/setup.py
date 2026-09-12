@@ -172,7 +172,7 @@ def main():
                     "commands": {name: str(bin_dir / name) for name in COMMANDS},
                     "optional_missing": [
                         name
-                        for name in ("helium-browser", "uv")
+                        for name in ("helium-browser", "uv", "ffmpeg")
                         if not shutil.which(name)
                     ],
                 },
