@@ -27,6 +27,8 @@ import repl
 ROOT = Path.home() / ".local/state/computer-use"
 # Pruned sessions move to <TRASH_PARENT>/tmp-trash-YYYYMMDD/computer-use-<name>.
 TRASH_PARENT = Path.home() / ".local/state"
+# The open interaction lock of this command, shared with a running REPL cell.
+HELD_LOCK = None
 
 
 def run(*args, **kwargs):
@@ -98,11 +100,16 @@ def load(name):
 @contextmanager
 def interaction_lock(name):
     # A name's lock must survive stop/recreate while old commands are waiting.
+    global HELD_LOCK
     locks = ROOT / ".locks"
     locks.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (locks / (name + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+        HELD_LOCK = lock
+        try:
+            yield lock
+        finally:
+            HELD_LOCK = None
 
 
 def reload_session(expected):
@@ -1094,16 +1101,19 @@ def perform(state, args, command):
         code = args.code if args.code is not None else sys.stdin.read()
         # Input helpers inside the cell retire references themselves, so a cell
         # may still click a reference from the previous CLI screenshot.
-        if args.reset:
-            repl.discard(state, save)
         output_dir = args.output_dir.expanduser().resolve() if args.output_dir else None
         reply = repl.call(
             state,
-            {"code": code, "image_dir": str(output_dir) if output_dir else None},
+            {
+                "code": code,
+                "image_dir": str(output_dir) if output_dir else None,
+                "cwd": os.getcwd(),
+            },
             service,
-            save,
+            HELD_LOCK,
             lambda: stop_marker(state).exists(),
             args.timeout,
+            reset=args.reset,
         )
         sys.stdout.write(reply.get("stdout", ""))
         for image in reply.get("images", []):

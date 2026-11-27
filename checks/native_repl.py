@@ -1,9 +1,11 @@
-"""Exercise the persistent session REPL against a real zenity dialog on Xvfb.
+"""Exercise the persistent session REPL against real dialogs on Xvfb.
 
 One REPL call opens zenity, types three lines, presses OK and asserts the
-dialog's output; the same task through single CLI commands needs at least five
-calls. Also checks state persistence, error and timeout recovery, stdin cells,
-cleanup on stop, and that the host focus, cursor and clipboard stay unchanged.
+dialog's output. Also checks the observation helpers, state persistence,
+error and timeout recovery, stdin cells, the cdp global and its reference
+invalidation, spawn logs, the caller's working directory, subprocess output,
+stop with a live child, and that the host focus, cursor and clipboard stay
+unchanged.
 """
 
 import json
@@ -14,8 +16,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from PIL import Image
+
 from host_isolation import probe
-from native_ocr import CLI, STATE, command, wait_until
+from native_ocr import CLI, STATE, command
 
 LINES = ["first line", "second line", "third line"]
 
@@ -23,7 +27,7 @@ LINES = ["first line", "second line", "third line"]
 # the OK button is targeted by its OCR text.
 ZENITY_CELL = """
 p = spawn("zenity", "--text-info", "--editable", "--title=Repl notes",
-          "--width=600", "--height=400")
+          "--width=600", "--height=400", capture=True)
 focus(wait_window("Repl notes"))
 wait_stable()
 type("first line\\nsecond line\\nthird line")
@@ -51,6 +55,11 @@ info.wait(timeout=10)
 print("observed", len(tree.splitlines()) > 3, info.returncode)
 """
 
+FAKE_AGENT_BROWSER = """#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/agent-browser.log"
+echo "fake $5"
+"""
+
 
 def images(stdout):
     return [
@@ -60,82 +69,18 @@ def images(stdout):
     ]
 
 
-def piped(name, *args, stdin):
-    return subprocess.run(
-        [sys.executable, str(CLI), *args[:1], name, *args[1:]],
+def repl(name, code, cwd=None, stdin=None, ok=True):
+    result = subprocess.run(
+        [sys.executable, str(CLI), "repl", name, *(["--code", code] if code else [])],
+        cwd=cwd,
         stdin=stdin,
         capture_output=True,
         text=True,
-        check=True,
-        timeout=30,
+        timeout=120,
+        check=False,
     )
-
-
-def cli_baseline(name, directory, session_dir):
-    """Run the zenity task one CLI command per step; return the call count."""
-    calls = 0
-
-    def cli(*args):
-        nonlocal calls
-        calls += 1
-        return command(*args)
-
-    output = directory / "zenity-cli.txt"
-    cli(
-        "launch",
-        name,
-        "--id",
-        "notes",
-        "--",
-        "sh",
-        "-c",
-        "zenity --text-info --editable --title='CLI notes' "
-        f"--width=600 --height=400 > {output}",
-    )
-    found = []
-
-    def listed():
-        found[:] = [
-            w
-            for w in json.loads(cli("windows", name).stdout)
-            if w["title"] == "CLI notes"
-        ]
-        return found
-
-    wait_until(listed, "CLI zenity window")
-    cli("input", name, "--", "windowfocus", str(found[0]["id"]))
-    text = directory / "lines.txt"
-    text.write_text("\n".join(LINES))
-    with text.open() as stdin:
-        calls += 1
-        piped(name, "clipboard", "set", stdin=stdin)
-    cli("input", name, "--", "key", "--clearmodifiers", "ctrl+v")
-    # An agent recaptures when click verification sees the dialog still redrawing.
-    for _ in range(4):
-        cli(
-            "screenshot",
-            name,
-            "--targets",
-            "text",
-            "--output",
-            str(directory / "cli.png"),
-        )
-        snapshot = json.loads((session_dir / "ocr-snapshot.json").read_text())
-        ok = next(t for t in snapshot["targets"] if t["text"] == "OK")
-        calls += 1
-        clicked = subprocess.run(
-            [sys.executable, str(CLI), "click", name, "@" + ok["ref"]],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if clicked.returncode == 0:
-            break
-        assert "changed" in clicked.stderr, clicked.stderr
-    wait_until(lambda: output.exists() and output.read_text(), "CLI output")
-    assert output.read_text().splitlines() == LINES
-    return calls
+    assert (result.returncode == 0) == ok, result
+    return result
 
 
 def main(directory):
@@ -151,28 +96,27 @@ def main(directory):
     try:
         command("start", name, "--size", "1000x700")
 
-        result = command("repl", name, "--code", ZENITY_CELL, timeout=120)
+        result = repl(name, ZENITY_CELL)
         assert f"zenity: {LINES}" in result.stdout, result
         shots = images(result.stdout)
         assert len(shots) == 1 and Path(shots[0]).is_file(), result.stdout
         print("PASS one repl call drives zenity end to end", flush=True)
 
-        observed = command("repl", name, "--code", OBSERVE_CELL, timeout=120)
+        observed = repl(name, OBSERVE_CELL)
         assert "observed True 0" in observed.stdout, observed
-        assert len(images(observed.stdout)) == 1, observed.stdout
+        [crop] = images(observed.stdout)
+        with Image.open(crop) as image:
+            # 200x120 is below the 800 px target, so zoom upscales it 4x.
+            assert image.size == (800, 480), image.size
+            colors = image.convert("RGB").getcolors(maxcolors=1 << 20)
+            assert len(colors) > 10, "blank crop"
         print("PASS a11y(), ocr() and zoom() read a live dialog", flush=True)
 
-        calls = cli_baseline(name, directory, session_dir)
-        assert calls >= 5, calls
-        print(
-            f"PASS the same task takes {calls} CLI calls without the repl", flush=True
-        )
-
-        command("repl", name, "--code", "counter = 41")
-        assert command("repl", name, "--code", "counter + 1").stdout.strip() == "42"
-        failed = command("repl", name, "--code", "1 / 0", ok=False)
+        repl(name, "counter = 41")
+        assert repl(name, "counter + 1").stdout.strip() == "42"
+        failed = repl(name, "1 / 0", ok=False)
         assert "ZeroDivisionError" in failed.stderr, failed.stderr
-        assert command("repl", name, "--code", "print(counter)").stdout == "41\n"
+        assert repl(name, "print(counter)").stdout == "41\n"
         timed_out = command(
             "repl",
             name,
@@ -186,9 +130,71 @@ def main(directory):
         cell = directory / "cell.py"
         cell.write_text("print(counter * 2)\n")
         with cell.open() as stdin:
-            assert piped(name, "repl", stdin=stdin).stdout == "82\n"
+            assert repl(name, None, stdin=stdin).stdout == "82\n"
         print("PASS state persists across calls, errors and timeouts", flush=True)
 
+        # F3: cdp is bound, and follows a browser recorded between cells.
+        assert repl(name, "print(cdp)").stdout == "None\n"
+        recorded = json.loads((session_dir / "state.json").read_text())
+        recorded["apps"]["fakecdp"] = {
+            "unit": recorded["prefix"] + "-app-fakecdp.service",
+            "cdp_port": 9,
+        }
+        (session_dir / "state.json").write_text(json.dumps(recorded))
+        assert repl(name, "print(cdp.port)").stdout == "9\n"
+        # F4: driving the browser through cdp retires screenshot references.
+        fake = directory / "agent-browser"
+        fake.write_text(FAKE_AGENT_BROWSER)
+        fake.chmod(0o700)
+        snapshot = session_dir / "ocr-snapshot.json"
+        driven = repl(
+            name,
+            "import os\n"
+            "screenshot(targets='text')\n"
+            f"print(os.path.exists({str(snapshot)!r}))\n"
+            f"cdp.binary = {str(fake)!r}\n"
+            "print(cdp.run('click', '@e1').strip())\n"
+            f"print(os.path.exists({str(snapshot)!r}))\n",
+        )
+        assert driven.stdout == "True\nfake click\nFalse\n", driven
+        print("PASS cdp is bound and cdp.run retires references", flush=True)
+
+        # F5: a chatty spawned child is never blocked on an unread pipe.
+        done = directory / "spawn-done"
+        spawned = repl(
+            name,
+            "import os, time\n"
+            f"p = spawn('sh', '-c', 'head -c 200000 /dev/zero >&2; touch {done}; sleep 100')\n"
+            "start = time.monotonic()\n"
+            f"while not os.path.exists({str(done)!r}) and time.monotonic() - start < 5:\n"
+            "    time.sleep(0.05)\n"
+            f"print(os.path.exists({str(done)!r}), os.path.getsize(p.log))\n"
+            "p.kill()\n",
+        )
+        assert spawned.stdout == "True 200000\n", spawned
+        print("PASS spawn logs output instead of blocking on a pipe", flush=True)
+
+        # L4 and L5: relative paths use the caller's cwd; child output returns.
+        caller = directory / "caller"
+        caller.mkdir()
+        relative = repl(
+            name,
+            "import subprocess\n"
+            "subprocess.run(['echo', 'from-child'])\n"
+            "print(screenshot(targets=None, output='relative.png')['image'])\n",
+            cwd=caller,
+        )
+        assert (caller / "relative.png").is_file(), relative
+        assert relative.stdout == f"from-child\n{caller / 'relative.png'}\n", relative
+        print("PASS relative paths and subprocess output follow the caller", flush=True)
+
+        marker = directory / "child.pid"
+        repl(
+            name,
+            f"c = spawn('sleep', '1000')\nopen({str(marker)!r}, 'w').write(str(c.pid))",
+        )
+        child = int(marker.read_text())
+        assert Path(f"/proc/{child}").exists()
         state = json.loads((session_dir / "state.json").read_text())
         repl_unit = state["prefix"] + "-repl.service"
         assert repl_unit in state["units"]
@@ -198,6 +204,7 @@ def main(directory):
             ["systemctl", "--user", "is-active", "--quiet", repl_unit], check=False
         )
         assert alive.returncode != 0, "repl service survived stop"
+        assert not Path(f"/proc/{child}").exists(), "spawned child survived stop"
         print("PASS stop ends the repl and its children", flush=True)
 
         if host_before is not None:

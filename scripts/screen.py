@@ -1,4 +1,4 @@
-"""Pixel-level helpers shared by the CLI and the REPL: frames, settle, zoom."""
+"""Pixel-level helpers for the REPL: frame digests, waiting for a still screen, zoom."""
 
 import hashlib
 import math

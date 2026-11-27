@@ -5,11 +5,15 @@ cell per request over a private Unix socket. The server keeps one namespace for
 the session's lifetime and preloads helpers that reuse the CLI's own code paths:
 reference verification before clicks, the a-g snapshot sequence, invalidation
 after input, and the session-owned clipboard.
+
+While a cell runs the server is authoritative for state.json, and the cell
+never outlives the session's interaction lock: the CLI passes its locked file
+to the server, so the lock stays held until both the CLI and the cell are done,
+even if the CLI is killed. The server interrupts a cell whose client went away.
 """
 
 import ast
 import contextlib
-import io
 import json
 import os
 import signal
@@ -17,6 +21,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.request
@@ -24,6 +29,13 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 MAX_MESSAGE = 16 * 1024 * 1024
+# Cell output beyond this is cut so the reply stays under MAX_MESSAGE.
+MAX_OUTPUT = 8 * 1024 * 1024
+# Time an interrupted cell gets to finish before its REPL is stopped.
+GRACE = 5.0
+# The server serves one connection at a time, so a request must arrive quickly.
+REQUEST_TIMEOUT = 2.0
+PING_TIMEOUT = 5.0
 
 
 def socket_path(state):
@@ -32,6 +44,10 @@ def socket_path(state):
 
 def unit_name(state):
     return state["prefix"] + "-repl.service"
+
+
+def notice(message):
+    print("computer-use: " + message, file=sys.stderr, flush=True)
 
 
 def exchange(state, message, timeout):
@@ -43,107 +59,178 @@ def exchange(state, message, timeout):
             return json.loads(response.readline(MAX_MESSAGE))
 
 
-def active(unit):
-    return (
-        subprocess.run(
-            ["systemctl", "--user", "is-active", "--quiet", unit], check=False
-        ).returncode
-        == 0
+def fresh(state):
+    """Reload state.json; the REPL server may have written it during a cell."""
+    import computer_use
+
+    current = computer_use.load(state["name"])
+    if current["prefix"] != state["prefix"]:
+        raise RuntimeError("Session was replaced while this command ran; retry")
+    return current
+
+
+def discard(state):
+    """Stop the REPL and drop only its unit from the state on disk."""
+    import computer_use
+
+    current = fresh(state)
+    unit = unit_name(current)
+    subprocess.run(
+        ["systemctl", "--user", "stop", unit], capture_output=True, check=False
     )
+    if computer_use.active(unit):
+        raise RuntimeError(f"Could not stop {unit}")
+    if unit in current["units"]:
+        current["units"].remove(unit)
+        computer_use.save(current)
+    socket_path(current).unlink(missing_ok=True)
+    return current
 
 
-def discard(state, save_state):
+def status(state):
+    """ready, busy (accepts but does not answer) or dead."""
+    try:
+        reply = exchange(state, {"action": "ping"}, timeout=PING_TIMEOUT)
+    except TimeoutError:
+        return "busy"
+    except (OSError, ValueError):
+        return "dead"
+    return "ready" if reply.get("ready") else "dead"
+
+
+def ensure(state, start_service, reset=False):
+    """Return fresh state with a ready REPL; never replace a live one silently."""
+    import computer_use
+
+    state = fresh(state)
     unit = unit_name(state)
-    if unit in state["units"]:
-        subprocess.run(
-            ["systemctl", "--user", "stop", unit], capture_output=True, check=False
+    recorded = unit in state["units"]
+    if reset:
+        lost = "--reset" if recorded else None
+    else:
+        current = status(state)
+        if current == "ready":
+            return state
+        if current == "busy":
+            raise RuntimeError(
+                "The REPL is not answering; a cell from an earlier call may still be "
+                "running. Retry, or pass --reset to stop it and discard its state"
+            )
+        lost = (
+            None
+            if not recorded
+            else "it stopped answering"
+            if computer_use.active(unit)
+            else "its service had stopped"
         )
-        if active(unit):
-            raise RuntimeError(f"Could not stop {unit}")
-        state["units"].remove(unit)
-        save_state(state)
-    socket_path(state).unlink(missing_ok=True)
-
-
-def ensure(state, start_service, save_state):
     if len(os.fsencode(socket_path(state))) >= 108:
         raise RuntimeError("Session path is too long for the REPL socket")
-    try:
-        if exchange(state, {"action": "ping"}, timeout=1).get("ready"):
-            return
-    except (OSError, ValueError):
-        pass
-    # A crashed server leaves its unit recorded; replace it without duplicating it.
-    discard(state, save_state)
+    state = discard(state)
     start_service(
         state,
-        unit_name(state),
+        unit,
         [sys.executable, str(SCRIPTS / "repl.py"), "--session", state["name"]],
     )
     deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        try:
-            if exchange(state, {"action": "ping"}, timeout=1).get("ready"):
-                return
-        except (OSError, ValueError):
-            time.sleep(0.05)
-    raise RuntimeError(
-        f"REPL did not start; inspect journalctl --user -u {unit_name(state)}"
+    while status(state) != "ready":
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"REPL did not start; inspect journalctl --user -u {unit}"
+            )
+        time.sleep(0.05)
+    if lost:
+        notice(f"started a fresh REPL; previous state lost ({lost})")
+    return state
+
+
+def interrupt(state):
+    # SIGINT raises KeyboardInterrupt inside the cell and keeps the namespace.
+    subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "kill",
+            "--signal=SIGINT",
+            "--kill-whom=main",
+            unit_name(state),
+        ],
+        capture_output=True,
+        check=False,
     )
 
 
-def call(state, request, start_service, save_state, stopping, timeout):
-    """Run one cell; return the server's reply. `stopping()` aborts the wait."""
-    ensure(state, start_service, save_state)
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(1)
-        connection.connect(str(socket_path(state)))
-        connection.sendall(json.dumps({"action": "run", **request}).encode() + b"\n")
-        connection.settimeout(0.1)
-        received = bytearray()
-        deadline = time.monotonic() + timeout
-        interrupted = None
-        while not received.endswith(b"\n"):
-            if stopping():
-                raise RuntimeError("Cell cancelled because the session is stopping")
-            now = time.monotonic()
-            if interrupted is None and now >= deadline:
-                # SIGINT raises KeyboardInterrupt inside the cell and keeps state.
-                subprocess.run(
-                    [
-                        "systemctl",
-                        "--user",
-                        "kill",
-                        "--signal=SIGINT",
-                        "--kill-whom=main",
-                        unit_name(state),
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-                interrupted = now
-            elif interrupted is not None and now >= interrupted + 5:
-                discard(state, save_state)
-                raise RuntimeError(
-                    "Cell ignored its interrupt; the REPL was restarted and its state lost"
-                )
-            try:
-                chunk = connection.recv(65536)
-            except TimeoutError:
-                continue
-            if not chunk:
-                raise RuntimeError(
-                    f"REPL exited during the cell; inspect journalctl --user -u {unit_name(state)}"
-                )
-            received += chunk
-            if len(received) > MAX_MESSAGE:
-                raise RuntimeError("Cell output exceeded 16 MiB")
+def call(state, request, start_service, lock, stopping, timeout, reset=False):
+    """Run one cell while holding `lock`; return the server's reply.
+
+    A timeout, `stopping()` or SIGTERM/SIGINT/SIGHUP interrupts the cell and
+    waits for it to end before returning, so the lock is never released while
+    the cell can still drive the desktop.
+    """
+    payload = json.dumps({"action": "run", **request}).encode() + b"\n"
+    if len(payload) > MAX_MESSAGE:
+        raise RuntimeError("Cell request too large (over 16 MiB)")
+    state = ensure(state, start_service, reset=reset)
+    signals = []
+    previous = {
+        number: signal.signal(number, lambda signum, _frame: signals.append(signum))
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    }
+    reason = None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(PING_TIMEOUT)
+            connection.connect(str(socket_path(state)))
+            # The server keeps this open file description until the cell ends.
+            socket.send_fds(connection, [b"L"], [lock.fileno()])
+            connection.sendall(payload)
+            connection.settimeout(0.1)
+            received = bytearray()
+            deadline = time.monotonic() + timeout
+            interrupted_at = None
+            while not received.endswith(b"\n"):
+                now = time.monotonic()
+                if reason is None:
+                    if signals:
+                        reason = (
+                            f"this command received {signal.Signals(signals[0]).name}"
+                        )
+                    elif stopping():
+                        reason = "the session is stopping"
+                    elif now >= deadline:
+                        reason = f"its {timeout:g} s timeout passed"
+                    if reason is not None:
+                        interrupt(state)
+                        interrupted_at = now
+                elif now >= interrupted_at + GRACE:
+                    discard(state)
+                    raise RuntimeError(
+                        f"Cell ignored its interrupt ({reason}); the REPL was "
+                        "stopped and its state lost"
+                    )
+                try:
+                    chunk = connection.recv(65536)
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    raise RuntimeError(
+                        "REPL exited during the cell; inspect journalctl --user -u "
+                        + unit_name(state)
+                    )
+                received += chunk
+                if len(received) > MAX_MESSAGE:
+                    raise RuntimeError("Cell output exceeded 16 MiB")
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
     reply = json.loads(received)
-    if interrupted is not None:
+    if reply.get("interrupted"):
         reply["error"] = (
-            f"Cell interrupted after its {timeout:g} s timeout; state is kept\n"
+            f"Cell interrupted because {reason or 'of an interrupt'}; REPL state is kept\n"
             + (reply.get("error") or "")
         )
+    elif reason is not None and not reason.startswith("its "):
+        # The cell finished before the interrupt landed, but the caller asked to stop.
+        reply["error"] = f"Cell finished, but {reason}\n" + (reply.get("error") or "")
     return reply
 
 
@@ -221,7 +308,8 @@ class Session:
 
         Returns the snapshot: image path, size and targets with refs, like `query`.
         """
-        output = Path(output) if output else self.next_image(targets or "raw")
+        # Relative paths resolve against the calling command's directory.
+        output = Path(output).resolve() if output else self.next_image(targets or "raw")
         output.parent.mkdir(parents=True, exist_ok=True)
         self.targets.screenshot(
             self.state,
@@ -260,7 +348,7 @@ class Session:
         """Crop a fresh capture to box=(x0, y0, x1, y1); returns the image path."""
         import screen
 
-        output = Path(output) if output else self.next_image("zoom")
+        output = Path(output).resolve() if output else self.next_image("zoom")
         return screen.zoom(self.env, box, output, scale=scale)
 
     def wait_stable(self, timeout=5.0, quiet=0.3):
@@ -387,17 +475,38 @@ class Session:
 
     # Processes
 
-    def spawn(self, *command):
-        """Start a process in this display; it ends with the REPL or the session."""
+    def spawn(self, *command, capture=False):
+        """Start a process in this display; it ends with the REPL or the session.
+
+        Output goes to a log file (its path is `.log`) so a chatty app never
+        blocks on a full pipe. capture=True gives text pipes for communicate().
+        """
         self.invalidate()
-        return subprocess.Popen(
-            command,
-            env=self.env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        if capture:
+            process = subprocess.Popen(
+                command,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            process.log = None
+            return process
+        logs = Path(self.state["directory"]) / "spawn-logs"
+        logs.mkdir(mode=0o700, exist_ok=True)
+        self.counter += 1
+        log = logs / f"{self.counter:04d}-{Path(command[0]).name}.log"
+        with log.open("ab") as output:
+            process = subprocess.Popen(
+                command,
+                env=self.env,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+            )
+        process.log = str(log)
+        return process
 
     def launch(self, app_id, *command):
         """Start a session-owned app service, like `computer-use launch`."""
@@ -411,11 +520,16 @@ class Session:
             for app in self.state["apps"].values()
             if app.get("cdp_port")
         ]
-        return CDP(self.name, ports[0]) if ports else None
+        return CDP(self, ports[0]) if ports else None
 
 
 class CDP:
-    """The session browser's DevTools port, driven through agent-browser."""
+    """The session browser's DevTools port, driven through agent-browser.
+
+    `run` may change the page, so it retires screenshot references first.
+    """
+
+    binary = "agent-browser"
 
     def __init__(self, session, port):
         self.session = session
@@ -427,11 +541,12 @@ class CDP:
             return json.loads(response.read())
 
     def run(self, *args, timeout=60):
+        self.session.invalidate()
         return subprocess.run(
             [
-                "agent-browser",
+                self.binary,
                 "--session",
-                self.session,
+                self.session.name,
                 "--cdp",
                 str(self.port),
                 *map(str, args),
@@ -468,6 +583,14 @@ HELPERS = (
     "xdotool",
 )
 
+RUNNING = threading.Event()
+
+
+def interrupt_cell(_signum, _frame):
+    # Signals outside a cell (a late timeout, a stray kill) are ignored.
+    if RUNNING.is_set():
+        raise KeyboardInterrupt
+
 
 def execute(code, namespace):
     """Run a cell; echo the last expression's value like an interactive prompt."""
@@ -482,18 +605,126 @@ def execute(code, namespace):
             print(repr(value))
 
 
+@contextlib.contextmanager
+def captured_output(directory, collected):
+    """Send fds 1 and 2, and sys.stdout/stderr, to one file for the cell.
+
+    Subprocesses that inherit the descriptors land in the reply in order.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    streams = sys.stdout, sys.stderr
+    saved = os.dup(1), os.dup(2)
+    with tempfile.TemporaryFile(dir=directory) as capture:
+        os.dup2(capture.fileno(), 1)
+        os.dup2(capture.fileno(), 2)
+        sys.stdout = open(1, "w", buffering=1, errors="replace", closefd=False)
+        sys.stderr = open(2, "w", buffering=1, errors="replace", closefd=False)
+        try:
+            yield
+        finally:
+            for stream in (sys.stdout, sys.stderr):
+                with contextlib.suppress(OSError, ValueError):
+                    stream.flush()
+            sys.stdout, sys.stderr = streams
+            os.dup2(saved[0], 1)
+            os.dup2(saved[1], 2)
+            os.close(saved[0])
+            os.close(saved[1])
+            capture.seek(0)
+            output = capture.read(MAX_OUTPUT + 1)
+            text = output[:MAX_OUTPUT].decode(errors="replace")
+            if len(output) > MAX_OUTPUT:
+                text += "\n[output truncated at 8 MiB]\n"
+            collected.append(text)
+
+
+def watch_client(connection, done):
+    """Interrupt the cell if its client disappears; end the REPL if it won't stop."""
+    while not done.wait(0.1):
+        try:
+            if connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b"":
+                break
+        except BlockingIOError:
+            continue
+        except OSError:
+            break
+    else:
+        return
+    os.kill(os.getpid(), signal.SIGINT)
+    if not done.wait(GRACE):
+        # systemd then stops what the cell started; the lock closes with us.
+        os._exit(70)
+
+
+def read_request(connection):
+    """Return (message, lock fd or None) from one bounded request."""
+    connection.settimeout(REQUEST_TIMEOUT)
+    data, fds, _flags, _address = socket.recv_fds(connection, 1, 2)
+    for extra in fds[1:]:
+        os.close(extra)
+    lock = fds[0] if fds else None
+    try:
+        buffer = bytearray(b"" if data == b"L" else data)
+        while not buffer.endswith(b"\n"):
+            if len(buffer) > MAX_MESSAGE:
+                raise ValueError("request too large")
+            chunk = connection.recv(65536)
+            if not chunk:
+                raise ValueError("incomplete request")
+            buffer += chunk
+        message = json.loads(buffer)
+        if not isinstance(message, dict):
+            raise ValueError("request must be a JSON object")
+        return message, lock
+    except BaseException:
+        if lock is not None:
+            os.close(lock)
+        raise
+
+
+def run_cell(session, namespace, message, connection):
+    session.refresh(message.get("image_dir"))
+    with contextlib.suppress(OSError, TypeError):
+        os.chdir(message.get("cwd"))
+    namespace["cdp"] = session.cdp
+    # A cell may have replaced the handler; every cell starts interruptible.
+    signal.signal(signal.SIGINT, interrupt_cell)
+    connection.settimeout(None)
+    done = threading.Event()
+    threading.Thread(target=watch_client, args=(connection, done), daemon=True).start()
+    collected, error, interrupted = [], None, False
+    try:
+        with captured_output(session.state["directory"], collected):
+            RUNNING.set()
+            try:
+                execute(message["code"], namespace)
+            finally:
+                RUNNING.clear()
+    except KeyboardInterrupt as exc:
+        interrupted = True
+        error = "".join(traceback.format_exception(exc))
+    except SystemExit as exc:
+        if exc.code:
+            error = "".join(traceback.format_exception(exc))
+    except BaseException as exc:  # noqa: BLE001 - The cell's failure is the reply, never the server's.
+        error = "".join(traceback.format_exception(exc))
+    finally:
+        done.set()
+    return {
+        "stdout": collected[0] if collected else "",
+        "images": session.images,
+        "error": error,
+        "interrupted": interrupted,
+    }
+
+
 def serve(name):
     sys.path.insert(0, str(SCRIPTS))
     session = Session(name)
     namespace = {"__name__": "__repl__", "session": session}
     namespace.update({helper: getattr(session, helper) for helper in HELPERS})
-    running = False
-
-    def interrupt(_signum, _frame):
-        if running:
-            raise KeyboardInterrupt
-
-    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGINT, interrupt_cell)
     path = socket_path(session.state)
     path.unlink(missing_ok=True)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -501,40 +732,29 @@ def serve(name):
         server.listen(4)
         while True:
             connection, _ = server.accept()
+            lock = None
             with connection:
                 try:
-                    with connection.makefile("rb") as incoming:
-                        message = json.loads(incoming.readline(MAX_MESSAGE))
-                except (OSError, ValueError):
-                    continue
-                if message.get("action") == "ping":
-                    reply = {"ready": True}
+                    message, lock = read_request(connection)
+                except (OSError, ValueError) as error:
+                    reply = {"error": f"Bad request: {error}"}
                 else:
-                    stdout, error = io.StringIO(), None
-                    try:
-                        session.refresh(message.get("image_dir"))
-                        running = True
-                        with (
-                            contextlib.redirect_stdout(stdout),
-                            contextlib.redirect_stderr(stdout),
-                        ):
-                            execute(message["code"], namespace)
-                    except BaseException as exc:  # noqa: BLE001 - The cell's failure is the reply, never the server's.
-                        if isinstance(exc, SystemExit) and not exc.code:
-                            error = None
-                        else:
-                            error = "".join(traceback.format_exception(exc))
-                    finally:
-                        running = False
-                    reply = {
-                        "stdout": stdout.getvalue(),
-                        "images": session.images,
-                        "error": error,
-                    }
+                    if message.get("action") == "ping":
+                        reply = {"ready": True}
+                    elif message.get("action") == "run" and isinstance(
+                        message.get("code"), str
+                    ):
+                        reply = run_cell(session, namespace, message, connection)
+                    else:
+                        reply = {"error": "Bad request: unknown action"}
                 try:
                     connection.sendall(json.dumps(reply).encode() + b"\n")
                 except OSError:
                     pass
+                finally:
+                    # Releasing our share of the lock lets the next command run.
+                    if lock is not None:
+                        os.close(lock)
 
 
 if __name__ == "__main__":
