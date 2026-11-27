@@ -5,6 +5,24 @@ description: Operate native Linux apps and browsers on an isolated virtual deskt
 
 # Computer use
 
+## On Alex's machines
+
+`computer-use` and `virtual-browser` are already on `PATH` on **arch** and
+**forge**; skip setup there unless a command is missing. Neither machine runs a
+window manager inside sessions (see below). From another machine, run the
+commands through Today's `machine_exec` on arch or forge, or dispatch a chat there.
+
+Today's own `computer_*` tools are deferred. Find them with `tool_search` using
+`limit` 12 or more; the default of 8 hides some of them.
+
+Forge got its packages on 2026-11-26 from the Arch Linux Archive snapshot of
+2026-10-31, because its package database is that old and current mirrors 404:
+`pacman --config` with `Server = https://archive.archlinux.org/repos/2026/10/31/$repo/os/$arch`
+(no `-Sy`, no upgrade). Its `~/.local/bin/computer-use` links to
+`~/.agents/skills/computer-use/scripts/computer_use.py`. To roll Forge back:
+`sudo pacman -Rns xorg-server-xvfb xdotool xclip zenity xdg-dbus-proxy xorg-xauth xorg-xdpyinfo python-gobject python-pillow`
+and `rm ~/.local/bin/computer-use`.
+
 ## First-use setup
 
 Before starting the first desktop in a task, run the bundled setup script. Resolve
@@ -216,5 +234,21 @@ computer-use stop invoice-task
 ```
 
 Choose a screenshot directory outside the temporary session directory to retain the images after cleanup. Stop cancels pending `input`/`exec` commands and terminates the recorded services, then removes the session files and login profiles. It leaves external screenshots and Alex's existing browser and apps in place. Verify the saved document or website result before claiming completion, and clean up task-owned desktops afterward.
+
+Sessions whose services all died (a reboot, a crashed Xvfb, a chat that never
+ran `stop`) stay in `computer-use list`. Clear them with `prune`:
+
+```bash
+computer-use prune --dry   # list what would move
+computer-use prune
+```
+
+`prune` refuses any session with an active unit or a command holding its lock.
+It moves each dead session directory to
+`~/.local/state/tmp-trash-YYYYMMDD/computer-use-NAME` (never deleting it), runs
+`systemctl --user reset-failed` on its units, and leaves external screenshot
+directories alone. It reports `computer-use-*` units that no remaining session
+owns as `orphan_units` and only clears the failed ones; stop an active orphan
+yourself after checking what it is.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).

@@ -166,6 +166,7 @@ ruff format --check scripts checks
 ~/.local/share/computer-use/ocr-venv/bin/python checks/ocr_contracts.py
 ~/.local/share/computer-use/ocr-venv/bin/python checks/icon_contracts.py
 python checks/accessibility_contracts.py
+python checks/prune_contracts.py
 python checks/automatic_screenshots.py
 python checks/native_ocr.py
 # After setup-ocr and setup-icons:

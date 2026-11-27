@@ -2,6 +2,7 @@
 """Run and control X11 desktop apps on a private virtual display."""
 
 import argparse
+import datetime
 import fcntl
 import json
 import os
@@ -24,6 +25,8 @@ import accessibility_targets
 import repl
 
 ROOT = Path.home() / ".local/state/computer-use"
+# Pruned sessions move to <TRASH_PARENT>/tmp-trash-YYYYMMDD/computer-use-<name>.
+TRASH_PARENT = Path.home() / ".local/state"
 
 
 def run(*args, **kwargs):
@@ -109,6 +112,121 @@ def reload_session(expected):
             "Session was replaced while this command waited; retry explicitly"
         )
     return current
+
+
+def unit_state(unit):
+    # A unit that was never loaded or has been collected reports "inactive".
+    return subprocess.run(
+        ["systemctl", "--user", "show", "--property=ActiveState", "--value", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+
+
+def loaded_session_units():
+    listed = subprocess.run(
+        [
+            "systemctl",
+            "--user",
+            "list-units",
+            "--all",
+            "--plain",
+            "--no-legend",
+            "computer-use-*",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [line.split()[0] for line in listed.splitlines() if line.strip()]
+
+
+def prune(dry=False, root=None, trash_parent=None, day=None):
+    """Move sessions whose units are all inactive into dated trash; never delete."""
+    root = root or ROOT
+    trash = (trash_parent or TRASH_PARENT) / (
+        "tmp-trash-" + (day or datetime.date.today()).strftime("%Y%m%d")
+    )
+    locks = root / ".locks"
+    candidates, pruned, kept = [], [], []
+    owners = {}  # Remaining sessions: name -> (unit prefix, recorded units).
+    directories = (
+        sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        if root.is_dir()
+        else []
+    )
+    for directory in directories:
+        name = directory.name
+        try:
+            state = json.loads((directory / "state.json").read_text())
+            units = list(
+                dict.fromkeys(
+                    unit
+                    for unit in [
+                        *state["units"],
+                        state.get("display_unit"),
+                        state.get("bus_unit"),
+                    ]
+                    if unit
+                )
+            )
+            owners[name] = (state["prefix"], set(units))
+        except (OSError, ValueError, KeyError, TypeError):
+            kept.append({"name": name, "reason": "no readable state.json"})
+            continue
+        locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (locks / (name + ".lock")).open("a") as lock:
+            # `start` saves state before its units run; its lock marks it busy.
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                kept.append({"name": name, "reason": "busy: a command holds its lock"})
+                continue
+            live = [
+                unit for unit in units if unit_state(unit) not in ("inactive", "failed")
+            ]
+            if live:
+                kept.append(
+                    {"name": name, "reason": "active units: " + ", ".join(live)}
+                )
+                continue
+            if dry:
+                candidates.append(name)
+                continue
+            trash.mkdir(mode=0o700, parents=True, exist_ok=True)
+            destination = trash / ("computer-use-" + name)
+            suffix = 1
+            while destination.exists():
+                suffix += 1
+                destination = trash / f"computer-use-{name}-{suffix}"
+            # A rename keeps the session's files intact; nothing is removed.
+            shutil.move(directory, destination)
+            for unit in units:
+                subprocess.run(
+                    ["systemctl", "--user", "reset-failed", unit],
+                    capture_output=True,
+                    check=False,
+                )
+            del owners[name]
+            pruned.append({"name": name, "trash": str(destination), "units": units})
+    orphans = []
+    for unit in loaded_session_units():
+        if any(
+            unit.startswith(prefix + "-") or unit in recorded
+            for prefix, recorded in owners.values()
+        ):
+            continue
+        if not dry and unit_state(unit) == "failed":
+            subprocess.run(
+                ["systemctl", "--user", "reset-failed", unit],
+                capture_output=True,
+                check=False,
+            )
+            continue
+        orphans.append(unit)
+    result = {"kept": kept, "orphan_units": orphans}
+    return {"prune": candidates, **result} if dry else {"pruned": pruned, **result}
 
 
 def stop_marker(state):
@@ -668,6 +786,13 @@ def parser():
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="action", required=True)
     commands.add_parser("list", help="List owned sessions")
+    prune_command = commands.add_parser(
+        "prune",
+        help="Move sessions whose units are all inactive into dated trash",
+    )
+    prune_command.add_argument(
+        "--dry", action="store_true", help="Only list what would be moved"
+    )
     commands.add_parser("setup-ocr", help="Install and warm the local CPU OCR runtime")
     commands.add_parser(
         "setup-icons", help="Install and warm optional local CPU icon detection"
@@ -809,6 +934,9 @@ def main():
                 indent=2,
             )
         )
+        return
+    if args.action == "prune":
+        print(json.dumps(prune(dry=args.dry), indent=2))
         return
     if args.action == "start":
         with interaction_lock(args.name):
