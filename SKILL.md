@@ -27,7 +27,15 @@ runtimes (`setup-ocr`, `setup-icons`), and `~/.local/bin/computer-use` and
 `~/.agents/skills/computer-use/scripts/`. All native checks pass there. The
 browser's CDP port, when enabled, listens on 127.0.0.1 only.
 
+Forge has no desktop, and gtk4 (a zenity dependency) pulls in the desktop
+portal, which host-bus apps such as Chromium would otherwise start (it then
+fails with "cannot open display"). So the portal units are masked there
+(Arch keeps its portal):
+`systemctl --user mask xdg-desktop-portal.service xdg-desktop-portal-gtk.service xdg-document-portal.service xdg-permission-store.service`.
+Sessions are unaffected either way: their filtered buses never reach it.
+
 To roll Forge back:
+`systemctl --user unmask xdg-desktop-portal.service xdg-desktop-portal-gtk.service xdg-document-portal.service xdg-permission-store.service`, then
 `sudo pacman -Rns xorg-server-xvfb xdotool xclip zenity xdg-dbus-proxy xorg-xauth xorg-xdpyinfo python-gobject python-pillow helium-browser-bin tk`,
 `rm ~/.local/bin/computer-use ~/.local/bin/virtual-browser`, and move
 `~/.local/share/computer-use/{ocr-venv,icons-venv,models}` to dated trash.
