@@ -204,7 +204,7 @@ def reset_failed(unit):
 
 
 def recorded_units(state):
-    return list(
+    units = list(
         dict.fromkeys(
             unit
             for unit in [
@@ -215,6 +215,11 @@ def recorded_units(state):
             if unit
         )
     )
+    if not isinstance(state["units"], list) or not all(
+        isinstance(unit, str) and unit.startswith("computer-use-") for unit in units
+    ):
+        raise ValueError("units must be computer-use-* unit names")
+    return units
 
 
 def prune_session(directory, locks, trash, dry, owners):
@@ -230,17 +235,17 @@ def prune_session(directory, locks, trash, dry, owners):
         # Read under the lock: a stop + start can replace the session up to here.
         try:
             state = json.loads((directory / "state.json").read_text())
-            units = recorded_units(state)
             if "prefix" not in state:
                 return "kept", "no readable state.json"
+            units = recorded_units(state)
             if Path(state["directory"]).resolve() != directory.resolve():
                 return "kept", "state.json names another directory"
         except FileNotFoundError:
             if not directory.exists():
                 return "gone", None
             return "kept", "no readable state.json"
-        except (OSError, ValueError, KeyError, TypeError):
-            return "kept", "no readable state.json"
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return "kept", f"unusable state.json: {error}"
         owners[name] = set(units)
         live = [
             unit for unit in units if unit_state(unit) not in ("inactive", "failed")
@@ -256,7 +261,14 @@ def prune_session(directory, locks, trash, dry, owners):
         return "pruned", {"trash": str(destination), "units": units}
 
 
-def prune(dry=False, root=None, trash_parent=None, day=None, list_units=None):
+def prune(
+    dry=False,
+    root=None,
+    trash_parent=None,
+    day=None,
+    list_units=None,
+    ignore=("computer-use-check-",),
+):
     """Move sessions whose units are all inactive into dated trash; never delete."""
     root = root or ROOT
     trash = (trash_parent or TRASH_PARENT) / (
@@ -274,7 +286,7 @@ def prune(dry=False, root=None, trash_parent=None, day=None, list_units=None):
             outcome, detail = prune_session(
                 directory, root / ".locks", trash, dry, owners
             )
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 - One bad entry must not abort the report.
             # One bad entry is reported; the rest of the run continues.
             outcome, detail = "kept", f"error: {error}"
         if outcome == "kept":
@@ -291,12 +303,16 @@ def prune(dry=False, root=None, trash_parent=None, day=None, list_units=None):
         result["orphan_error"] = str(error)
     orphans, reset = [], []
     for unit in listed or []:
+        # Repo checks run their own sessions and units under this namespace.
+        if unit.startswith(tuple(ignore)):
+            continue
         if any(unit in recorded for recorded in owners.values()):
             continue
-        # Units are named computer-use-<folder>-...; this covers unrecorded units
-        # of remaining sessions and sessions that started during this run.
+        # Units are named computer-use-<folder>-<6 hex>-...; this covers
+        # unrecorded units of remaining sessions and of sessions that started
+        # during this run, without letting folder `a` claim session `a-2`.
         if any(
-            unit.startswith(f"computer-use-{path.name}-")
+            re.match(rf"computer-use-{re.escape(path.name)}-[0-9a-f]{{6}}-", unit)
             for path in (root.iterdir() if root.is_dir() else [])
             if not path.name.startswith(".")
         ):

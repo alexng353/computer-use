@@ -277,9 +277,15 @@ directories alone. A session it cannot move is listed under `kept` with the
 error, and the run continues.
 
 `orphan_units` lists `computer-use-*` units that no session owns, each with its
-`state`; inactive ones are left out, and units of a session that appeared
-during the run are skipped. The real run resets failed orphans and lists them
-in `reset_units`. Before stopping an orphan yourself, check what it is and that
-no new session folder now carries its name.
+`state`; inactive ones are left out. A unit belongs to a session when its
+`state.json` records it, or when it is named `computer-use-<folder>-<6 hex>-…`
+for a session folder that exists when the units are listed (so a session that
+started during the run is skipped, and folder `a` never claims session `a-2`).
+Units under `computer-use-check-` belong to the repository's checks and are
+never reported. The real run resets failed orphans and lists them in
+`reset_units`. If listing units fails, `orphan_units` is `null` and
+`orphan_error` says why; the session report is still complete. A session with an
+unusable `state.json` is kept with the reason. Before stopping an orphan
+yourself, check what it is and that no new session folder now carries its name.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).
