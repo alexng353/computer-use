@@ -131,7 +131,15 @@ computer-use setup-icons
 computer-use screenshot invoice-task --targets icons --output /absolute/path/icons.png
 ```
 
-These optional runtimes run locally on CPU. OCR returns recognized text boxes; the icon detector proposes visual regions, including some noninteractive content. Icon query results have `kind: "visual"` and `text: null`. Choose references from the image before querying or clicking. There is no combined overlay. All modes share coordinates, the a–g sequence and invalidation; switching modes replaces the current snapshot. The next screenshot defaults to accessibility again.
+These optional runtimes run locally on CPU. OCR returns recognized text boxes; the icon detector proposes visual regions, including some noninteractive content. Icon query results have `kind: "visual"` and `text: null`. Choose references from the image before querying or clicking. All modes share coordinates, the a–g sequence and invalidation; switching modes replaces the current snapshot. The next screenshot defaults to accessibility again.
+
+When one source misses things (a canvas, a custom widget, an icon-only button with no accessible name), use the combined overlay:
+
+```bash
+computer-use screenshot invoice-task --targets all --output /absolute/path/all.png
+```
+
+`--targets all` merges accessibility, OCR text and icon targets into one badge set. Accessibility wins, then OCR fills gaps, then icons. A box that overlaps a kept one by IoU 0.5 or sits at least 80% inside it (a button's own label) is the same control and gets no second badge. Each target keeps its `kind` (`accessibility`, `text` or `visual`), and `click` verifies it the way its own mode would: focus and semantics for accessibility targets, pixels for the others. The snapshot lists the `sources` it used; accessibility or icons are skipped (and named under `skipped`) when unavailable, while OCR is required. It runs every detector, so it is slower than a single mode.
 
 For unannotated inspection, use `screenshot ... --raw`; this clears references and cannot be combined with `--targets`. If accessibility dependencies are unavailable, create the desktop with `start --no-accessibility` and use explicit text/icon targets or raw capture. For an older desktop created without the private bus, `launch --accessibility` or `browser --accessibility` enables it for that launch and future launches; already-running apps need relaunching.
 

@@ -253,12 +253,24 @@ def main():
                 connection.settimeout(60)
                 try:
                     with connection.makefile("rb") as incoming:
-                        message = json.loads(incoming.readline(65536))
+                        # Merged `annotate` requests carry every target.
+                        message = json.loads(incoming.readline(4 * 1024 * 1024))
                     action = message.get("action")
                     if action == "ping":
                         result = {"ready": True}
                     elif action == "recognize":
                         result = recognize_targets(detector, message)
+                    elif action == "annotate":
+                        # Render a badge set merged by the client from all sources.
+                        with Image.open(message["source"]) as source:
+                            image = source.convert("RGB")
+                        rendered = annotate(
+                            image, message["targets"], Path(message["output"])
+                        )
+                        result = {
+                            "size": list(image.size),
+                            "image_size": list(rendered),
+                        }
                     elif action == "verify":
                         result = verify(message)
                         if args.targets == "accessibility" and result["matches"]:

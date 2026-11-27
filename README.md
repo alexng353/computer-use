@@ -121,7 +121,9 @@ computer-use click demo @b13
 computer-use screenshot demo --output /tmp/controls.png
 ```
 
-Choose references from the current image. Switching modes takes a new screenshot and invalidates all earlier references, using the same a–g sequence and pixel verification. `--targets accessibility` explicitly selects the default; `--raw` and `--targets` cannot be combined. Combined text/icon overlays are not offered.
+Choose references from the current image. Switching modes takes a new screenshot and invalidates all earlier references, using the same a–g sequence and pixel verification. `--targets accessibility` explicitly selects the default; `--raw` and `--targets` cannot be combined.
+
+`--targets all` captures once, asks each available worker (accessibility, OCR, icons, in that order) for its targets, and merges them in the client the way Microsoft UFO² merges UIA with OmniParser: a target is dropped when an already kept one overlaps it with IoU ≥ 0.5 or contains at least 80% of the smaller box. The OCR worker then renders the merged badges (`annotate`). Targets keep their `kind`, and click verification uses the accessibility worker for accessibility targets and pixel comparison for text and visual ones. The snapshot records `sources`, and `skipped` when accessibility or icons were unavailable; OCR is required.
 
 `setup-icons` installs a separate locked Python environment in `~/.local/share/computer-use/icons-venv`, downloads the 40.6 MB [Microsoft OmniParser v2 icon detector](https://huggingface.co/microsoft/OmniParser-v2.0/tree/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect) at a pinned revision, verifies its SHA-256, and warms the CPU model. The publisher licenses these weights under AGPL-3.0; see the [model license](https://huggingface.co/microsoft/OmniParser-v2.0/blob/6600256cb0f1b07651e3bc86166196307bad7e2d/icon_detect/LICENSE). Text mode requires none of these packages. Icon screenshots do not run OCR or generate icon captions, and neither mode uploads screenshots.
 
@@ -183,6 +185,9 @@ python checks/native_repl_lifecycle.py
 python checks/repl_contracts.py
 # Zoom on a 2560x1600 desktop and --settle on a delayed change; needs setup-ocr:
 python checks/native_zoom_settle.py
+python checks/targets_all_contracts.py
+# Needs Helium, setup-ocr and setup-icons:
+python checks/native_targets_all.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.

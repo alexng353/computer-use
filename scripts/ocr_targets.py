@@ -16,6 +16,12 @@ RUNTIME = Path.home() / ".local/share/computer-use/ocr-venv"
 SCRIPTS = Path(__file__).resolve().parent
 PREFIXES = "abcdefg"
 WORKERS = {"text": "ocr", "icons": "icons", "accessibility": "accessibility"}
+# `all` merges every available source; earlier sources win a duplicate.
+MERGE_ORDER = ("accessibility", "text", "icons")
+# Two boxes are one control when they overlap like this (UFO2-style IoU), or
+# when one sits almost wholly inside the other (OCR text inside its button).
+DUPLICATE_IOU = 0.5
+DUPLICATE_CONTAINMENT = 0.8
 
 
 def invalidate(state):
@@ -139,12 +145,114 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+def area(bounds):
+    return max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1])
+
+
+def duplicate(a, b):
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    if width <= 0 or height <= 0:
+        return False
+    shared = width * height
+    union = area(a) + area(b) - shared
+    return (
+        shared / union >= DUPLICATE_IOU
+        or shared / min(area(a), area(b)) >= DUPLICATE_CONTAINMENT
+    )
+
+
+def merge(groups):
+    """Keep each target unless an earlier-kept one covers the same control."""
+    kept = []
+    for targets in groups:
+        for target in targets:
+            if not any(duplicate(target["bounds"], k["bounds"]) for k in kept):
+                kept.append(target)
+    return kept
+
+
+def available_sources(state):
+    ready = {
+        "accessibility": state.get("accessibility_bus")
+        == accessibility_targets.bus_address(state)
+        and accessibility_targets.services_alive(state),
+        # Required: ensure_worker explains a missing OCR runtime.
+        "text": True,
+        "icons": (icon_detector.RUNTIME / "bin/python").exists()
+        and icon_detector.valid_model(icon_detector.MODEL),
+    }
+    return [mode for mode in MERGE_ORDER if ready[mode]]
+
+
+def recognize_all(state, start_service, source, output, prefix):
+    """One badge set from every available source, de-duplicated by overlap."""
+    groups, used, skipped = [], [], {}
+    with tempfile.TemporaryDirectory(dir=state["directory"]) as scratch:
+        for mode in available_sources(state):
+            try:
+                ensure_worker(state, start_service, target_mode=mode)
+                result = request(
+                    state,
+                    {
+                        "action": "recognize",
+                        "source": str(source),
+                        "output": str(Path(scratch) / f"{mode}.png"),
+                        "prefix": prefix,
+                    },
+                    target_mode=mode,
+                )
+            except RuntimeError as error:
+                # One source failing (no focused accessible window, say) must
+                # not hide what the others found.
+                if mode == "text":
+                    raise
+                skipped[mode] = str(error)
+                continue
+            used.append(mode)
+            groups.append(
+                [
+                    {**target, "kind": target.get("kind", mode)}
+                    for target in result["targets"]
+                ]
+            )
+    targets = merge(groups)
+    targets.sort(key=lambda item: (item["bounds"][1], item["bounds"][0]))
+    for index, target in enumerate(targets, start=1):
+        target["ref"] = prefix + str(index)
+    rendered = request(
+        state,
+        {
+            "action": "annotate",
+            "source": str(source),
+            "output": str(output),
+            "targets": targets,
+        },
+        target_mode="text",
+    )
+    return {
+        **rendered,
+        "targets": targets,
+        "sources": used,
+        **({"skipped": skipped} if skipped else {}),
+    }
+
+
+def verifier(snapshot, target):
+    """Worker that verifies a target: semantics for accessibility, pixels otherwise."""
+    mode = snapshot.get("target_mode", "text")
+    if mode != "all":
+        return mode
+    return "accessibility" if target.get("kind") == "accessibility" else "text"
+
+
 def screenshot(state, output, capture, start_service, raw=False, target_mode="text"):
     invalidate(state)
     if raw:
         capture(output)
         return
-    ensure_worker(state, start_service, target_mode=target_mode)
+    if target_mode != "all":
+        ensure_worker(state, start_service, target_mode=target_mode)
     directory = Path(state["directory"])
     counter = directory / "ocr-generation.json"
     generation = json.loads(counter.read_text()) + 1 if counter.exists() else 0
@@ -160,16 +268,21 @@ def screenshot(state, output, capture, start_service, raw=False, target_mode="te
         pending_source = Path(temporary) / "source.png"
         pending_output = Path(preview) / ("preview" + output.suffix)
         capture(pending_source)
-        result = request(
-            state,
-            {
-                "action": "recognize",
-                "source": str(pending_source),
-                "output": str(pending_output),
-                "prefix": prefix,
-            },
-            target_mode=target_mode,
-        )
+        if target_mode == "all":
+            result = recognize_all(
+                state, start_service, pending_source, pending_output, prefix
+            )
+        else:
+            result = request(
+                state,
+                {
+                    "action": "recognize",
+                    "source": str(pending_source),
+                    "output": str(pending_output),
+                    "prefix": prefix,
+                },
+                target_mode=target_mode,
+            )
         pending_source.replace(source)
         pending_output.replace(output)
     atomic_json(
@@ -209,7 +322,7 @@ def query(state, reference):
 def click(state, reference, capture, native_click, start_service):
     snapshot, target = query(state, reference)
     invalidate(state)
-    target_mode = snapshot.get("target_mode", "text")
+    target_mode = verifier(snapshot, target)
     ensure_worker(state, start_service, target_mode=target_mode)
     # A background redraw can happen even when no command has sent input.
     with tempfile.NamedTemporaryFile(dir=state["directory"], suffix=".png") as current:

@@ -975,7 +975,7 @@ def parser():
             )
             capture_mode.add_argument(
                 "--targets",
-                choices=["text", "icons", "accessibility"],
+                choices=["text", "icons", "accessibility", "all"],
                 default="accessibility",
                 help="Annotation targets (default: accessibility)",
             )
