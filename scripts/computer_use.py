@@ -1337,14 +1337,19 @@ def perform(state, args, command):
             reset=args.reset,
         )
         output = reply.get("stdout", "")
-        sys.stdout.write(output)
+        # Bytes, so a non-UTF-8 file name prints as itself instead of failing.
+        sys.stdout.flush()
+        sys.stdout.buffer.write(repl.to_bytes(output))
         for image in reply.get("images", []):
-            print("[image] " + image)
+            sys.stdout.buffer.write(b"[image] " + repl.to_bytes(image) + b"\n")
+        sys.stdout.buffer.flush()
         # A settled image after this must start on its own line.
         args.output_ended_line = bool(reply.get("images")) or output.endswith("\n")
         args.output_ended_line |= not output
         if reply.get("error"):
-            sys.stderr.write(reply["error"])
+            sys.stderr.flush()
+            sys.stderr.buffer.write(repl.to_bytes(reply["error"]))
+            sys.stderr.buffer.flush()
         # Returned, not raised, so --settle still runs after a failed cell.
         return 1 if reply.get("error") else 0
 
