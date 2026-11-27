@@ -349,13 +349,19 @@ class Session:
         import screen
 
         output = Path(output).resolve() if output else self.next_image("zoom")
-        return screen.zoom(self.env, box, output, scale=scale)
+        return screen.zoom(
+            self.env, box, output, scale=scale, size=self.cu.screen_size(self.state)
+        )
 
-    def wait_stable(self, timeout=5.0, quiet=0.3):
+    def wait_stable(self, timeout=None, quiet=None):
         """Wait until the screen stops changing; returns True if it settled."""
         import screen
 
-        return screen.wait_stable(self.env, timeout=timeout, quiet=quiet)
+        return screen.wait_stable(
+            self.env,
+            timeout=screen.SETTLE_CAP if timeout is None else timeout,
+            quiet=screen.SETTLE_QUIET if quiet is None else quiet,
+        )
 
     def a11y(self, max_nodes=3000):
         """Accessibility tree of every app in this session, as indented text."""

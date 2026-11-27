@@ -87,6 +87,8 @@ computer-use stop demo
 
 Automatic screenshots use accessibility targets; empty desktops and sessions without accessibility produce raw images. If annotation fails, a warning accompanies a raw image with no references. Focus-change retries repeat only capture, never input. Inspect the image: an asynchronous page load may still be in progress. If capture itself fails after input, the error reports that the interaction already completed so it is not accidentally repeated.
 
+`--settle[=MS]` on `input`, `click`, `exec` and `repl` polls SHA-256 digests of raw frames until none changes for MS milliseconds (default 500, cap max(5 s, 2×MS)) before the automatic capture; a change that starts later than MS is missed. `zoom NAME x0 y0 x1 y1 [--scale N] [--output PATH]` crops a fresh full-resolution capture (box checked against the screen, exclusive end), upscales small crops with Lanczos up to 8x to about 800 px, and prints the path. The REPL's `zoom()` and `wait_stable()` use the same code (`scripts/screen.py`).
+
 Explicit `screenshot --output /absolute/path.png` still prints only the image path. Target names and geometry stay in the owner-only session directory. `query` prints one target as JSON: `ref`, `text`, `confidence`, `bounds`, `center`, and source-image information. Bounds are `[x1, y1, x2, y2]` with exclusive right/bottom edges; center is `[x, y]`, all in original screenshot pixels from the top left. The default bounds describe accessible controls; `--targets text` returns OCR text bounds instead.
 
 References advance through `@a1`, `@b1`, …, `@g1`, then wrap. A new capture replaces the reference map; all `input`, `exec`, launch/browser, clipboard-set, and click operations invalidate it. Queries do not invalidate it and return cached coordinates; they do not recheck live pixels. Use a fresh screenshot when the app may have changed. A click checks the current pixels within its target bounds against the captured pixels before sending native input; accessibility targets also recheck focus and semantics. A changed target rejects the click. Repeated letters are intentionally short visual hints, not globally unique capture IDs: always use the latest image, including after wraparound. Pixels alone cannot distinguish two logically different controls with identical appearance.
@@ -179,6 +181,8 @@ python checks/native_accessibility.py
 python checks/native_repl.py
 python checks/native_repl_lifecycle.py
 python checks/repl_contracts.py
+# Zoom on a 2560x1600 desktop and --settle on a delayed change; needs setup-ocr:
+python checks/native_zoom_settle.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.

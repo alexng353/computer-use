@@ -24,6 +24,7 @@ from pathlib import Path
 import ocr_targets
 import accessibility_targets
 import repl
+import screen
 
 ROOT = Path.home() / ".local/state/computer-use"
 # Pruned sessions move to <TRASH_PARENT>/tmp-trash-YYYYMMDD/computer-use-<name>.
@@ -783,6 +784,37 @@ def capture_image(state, output):
     capture(dict(os.environ, **environment(state)), output)
 
 
+def screen_size(state):
+    return tuple(int(value) for value in state["size"].split("x"))
+
+
+def settle(state, args):
+    """Wait out redraws after an action; a settled repl also returns its screen."""
+    env = dict(os.environ, **environment(state))
+    if not screen.settle(env, args.settle):
+        print(
+            "computer-use: screen still changing at the settle cap; capturing anyway",
+            file=sys.stderr,
+        )
+    if args.action != "repl":
+        return
+    # The REPL server may have written state.json during the cell.
+    state = repl.fresh(state)
+    if state.get("screenshot_directory"):
+        image = automatic_screenshot(state, "repl")
+    else:
+        directory = (
+            args.output_dir.expanduser().resolve()
+            if args.output_dir
+            else Path(state["directory"]) / "repl-images"
+        )
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        image = directory / f"settled-{time.time_ns()}.png"
+        capture(env, image)
+    if image:
+        print("[image] " + str(image))
+
+
 def automatic_screenshot(state, action):
     directory = state.get("screenshot_directory")
     if directory is None or stop_marker(state).exists():
@@ -887,9 +919,21 @@ def parser():
         "windows",
         "clipboard",
         "repl",
+        "zoom",
     ]:
         sub = commands.add_parser(action)
         sub.add_argument("name", type=identifier)
+        if action in ["input", "click", "exec", "repl"]:
+            sub.add_argument(
+                "--settle",
+                nargs="?",
+                const=int(screen.SETTLE_QUIET * 1000),
+                type=int,
+                metavar="MS",
+                help="After the action, wait until the screen is unchanged for MS "
+                f"milliseconds (default {int(screen.SETTLE_QUIET * 1000)}; capped at "
+                f"{screen.SETTLE_CAP:g} s or twice MS) before any capture",
+            )
         if action == "start":
             sub.add_argument("--size", default="1440x1000")
             sub.add_argument(
@@ -941,7 +985,16 @@ def parser():
             )
         elif action == "clipboard":
             sub.add_argument("operation", choices=["get", "set"])
-        elif action == "repl":
+        if action == "zoom":
+            for coordinate in ["x0", "y0", "x1", "y1"]:
+                sub.add_argument(coordinate, type=int)
+            sub.add_argument("--output", type=Path)
+            sub.add_argument(
+                "--scale",
+                type=int,
+                help="Integer upscale (default: enlarge small crops up to 8x)",
+            )
+        if action == "repl":
             sub.add_argument(
                 "--code", help="Python cell to run (default: read it from stdin)"
             )
@@ -1067,6 +1120,8 @@ def main():
                         file=sys.stderr,
                     )
             raise
+        if getattr(args, "settle", None) is not None:
+            settle(state, args)
         screenshot = None
         if interaction:
             try:
@@ -1157,6 +1212,21 @@ def perform(state, args, command):
         ocr_targets.click(state, args.reference, capture_screen, native_click, service)
     elif args.action == "windows":
         print(json.dumps(list_windows(env), indent=2))
+    elif args.action == "zoom":
+        output = (
+            args.output.expanduser().resolve()
+            if args.output
+            else Path(state["directory"]) / f"zoom-{time.time_ns()}.png"
+        )
+        print(
+            screen.zoom(
+                env,
+                (args.x0, args.y0, args.x1, args.y1),
+                output,
+                scale=args.scale,
+                size=screen_size(state),
+            )
+        )
     elif args.action == "clipboard":
         if args.operation == "get":
             sys.stdout.write(get_clipboard(env))
