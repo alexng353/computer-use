@@ -116,7 +116,7 @@ After each interaction, inspect its returned screenshot before using references 
 
 Automatic captures use accessibility annotations. An empty desktop or a session without accessibility returns a raw image. If annotation fails, the helper warns and returns a raw image without references; use an explicit text/icon capture as needed. Focus-change retries repeat only the capture. A screenshot does not establish that an asynchronous page load has finished. If capture itself fails after an interaction, inspect the session before repeating that interaction.
 
-Add `--settle[=MS]` to `input`, `click`, `exec` or `repl` to wait, after the action and before any capture, until the screen has stayed unchanged for MS milliseconds (default 500; the wait is capped at 5 s, or twice MS when that is longer). A change that starts later than MS after the action is missed, so pass a window longer than the delay you expect, for example `click NAME @a3 --settle=2500` for a page that loads in about two seconds. If the screen is still changing at the cap, the command warns and captures anyway. `repl --settle` also returns one settled screenshot as a final `[image]` line.
+Add `--settle=MS` to `input`, `click`, `exec` or `repl` to wait, after the action and before any capture, until the screen has stayed unchanged for MS milliseconds (1 to 30000; a bare `--settle` means 500, but write it after the reference or as `--settle=MS`, since `click NAME --settle @a3` reads `@a3` as MS). The wait is capped at 5 s, or twice MS when that is longer. A change that starts later than MS after the action is missed, so pass a window longer than the delay you expect, for example `click NAME @a3 --settle=2500` for a page that loads in about two seconds. If the screen is still changing at the cap, the command warns and captures anyway. `stop` cancels a settle in progress. If settling itself fails, the action has already happened: the command warns (do not repeat the action), still captures, and keeps `exec`'s or the cell's exit status. `repl --settle` also returns one settled screenshot as a final `[image]` line, on its own line, even after a failed cell.
 
 Small text (status bars, tab titles, badges) can be unreadable once a large screenshot is scaled down for viewing. Read it from a full-resolution crop:
 
@@ -124,7 +124,7 @@ Small text (status bars, tab titles, badges) can be unreadable once a large scre
 computer-use zoom invoice-task 0 1560 640 1600   # x0 y0 x1 y1, exclusive end
 ```
 
-`zoom` prints the path of a PNG cropped from a fresh capture, upscaled up to 8x when the crop is small (`--scale N` to choose, `--output PATH` to place it). It does not change references. Leave a few pixels of margin around the text you want to read.
+`zoom` prints the path of a PNG cropped from a fresh capture, upscaled up to 8x when the crop is small (`--scale N` to choose, `--output PATH` to place it); output larger than 8192 px on its long edge is refused. It does not change references. Leave a few pixels of margin around the text you want to read.
 
 On crowded screens, badges may use an added gutter on the right. The original screen stays at its original scale and top-left position. Gutter pixels are not desktop coordinates; use `query` or `click` with the badge reference to target its original control.
 
@@ -211,7 +211,7 @@ Preloaded helpers:
 
 - `screenshot(targets="accessibility" | "text" | "icons" | None)` returns the snapshot (`image`, `targets` with refs), like `query`. `find(snapshot, text=, role=, exact=True)` returns the one matching target or raises.
 - `click("@a3" | target)` uses the same verification as `click`; `click(x, y, button=1, double=False)` clicks coordinates. `type(text)` types ASCII and pastes multiline or Unicode text through the session clipboard; `key("ctrl+s", ...)`, `scroll(dy, dx, x=, y=)`, `drag(x0, y0, x1, y1)`, `clipboard(text=None)`, `xdotool(...)`.
-- `zoom((x0, y0, x1, y1), scale=None)` returns a full-resolution crop (upscaled when small) and `wait_stable(timeout=5, quiet=0.5)` waits until the screen stops changing; both share their code with the CLI's `zoom` and `--settle`. `a11y()` returns the AT-SPI tree as text; `ocr(image=None)` returns text boxes without replacing the current references.
+- `zoom((x0, y0, x1, y1), scale=None)` returns a full-resolution crop (upscaled when small) and `wait_stable(timeout=5, quiet=0.5)` waits until the screen has been unchanged for `quiet` seconds, returning False at `timeout` (which must be at least `quiet`); both share their code with the CLI's `zoom` and `--settle`. `a11y()` returns the AT-SPI tree as text; `ocr(image=None)` returns text boxes without replacing the current references.
 - `windows()`, `wait_window(title)`, `focus(window)`, `spawn(*cmd, capture=False)` (a `Popen` that ends with the REPL; its output goes to the log file at `.log`, or to text pipes for `communicate()` with `capture=True`), `launch(app_id, *cmd)` (a session service, like `launch`), and `cdp` (the browser's DevTools port with `cdp.run(*agent_browser_args)`, which retires references like other input, or `None`).
 
 References follow the CLI rules: every input helper retires them, and a click on a
