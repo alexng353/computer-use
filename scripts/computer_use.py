@@ -1228,11 +1228,16 @@ def perform(state, args, command):
             args.timeout,
             reset=args.reset,
         )
-        sys.stdout.write(reply.get("stdout", ""))
+        # Bytes, so a non-UTF-8 file name prints as itself instead of failing.
+        sys.stdout.flush()
+        sys.stdout.buffer.write(repl.to_bytes(reply.get("stdout", "")))
         for image in reply.get("images", []):
-            print("[image] " + image)
+            sys.stdout.buffer.write(b"[image] " + repl.to_bytes(image) + b"\n")
+        sys.stdout.buffer.flush()
         if reply.get("error"):
-            sys.stderr.write(reply["error"])
+            sys.stderr.flush()
+            sys.stderr.buffer.write(repl.to_bytes(reply["error"]))
+            sys.stderr.buffer.flush()
             raise SystemExit(1)
 
 

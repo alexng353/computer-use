@@ -11,12 +11,135 @@ import json
 import os
 import secrets
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
-from native_ocr import STATE, command
+from native_ocr import CLI, STATE, command
 from native_repl_lifecycle import locked, state, unit_active
+
+
+def run_bytes(name, code):
+    """Run a cell given as bytes (argv may hold non-UTF-8); return raw output."""
+    return subprocess.run(
+        [sys.executable, str(CLI), "repl", name, "--code", code],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def check_2c(name, directory):
+    """Fix-up 2c: surrogates, forked children, kept output, reply budget."""
+    state_file = STATE / name / "state.json"
+    command("repl", name, "--code", "kept = 'yes'")
+
+    # C2-M1: surrogates in errors, image paths and code never kill the server.
+    raised = run_bytes(
+        name,
+        b"raise ValueError('missing ' + b'\\xff.png'.decode('utf-8', 'surrogateescape'))",
+    )
+    assert raised.returncode == 1, raised
+    assert b"ValueError: missing \xff.png" in raised.stderr, raised.stderr[-300:]
+    odd = os.fsencode(directory) + b"/\xff.png"
+    with open(odd, "wb") as image:
+        image.write(b"png")
+    shown = run_bytes(
+        name, b"import os\ndisplay(os.fsdecode(" + repr(odd).encode() + b"))"
+    )
+    assert shown.returncode == 0 and b"\xff.png" in shown.stdout, shown
+    # Non-UTF-8 code cannot compile, but it reaches the REPL and fails as a cell.
+    argv = run_bytes(name, b"print(len('\xff'))")
+    assert argv.returncode == 1 and b"surrogates not allowed" in argv.stderr, argv
+    after = command("repl", name, "--code", "print(kept)")
+    assert after.stdout == "yes\n" and "state lost" not in after.stderr, after
+    print("PASS surrogates in errors, image paths and code keep the REPL", flush=True)
+
+    # C2-L2 / L5: deep JSON, and refresh failures, get error replies.
+    deep = raw_request(name, b"[" * 100_000 + b"]" * 100_000 + b"\n")
+    assert "error" in deep, deep
+    original = state_file.read_text()
+    for broken in (
+        {k: v for k, v in json.loads(original).items() if k != "prefix"},
+        {**json.loads(original), "prefix": "computer-use-replaced-000000"},
+    ):
+        state_file.write_text(json.dumps(broken))
+        try:
+            reply = raw_request(name, b'{"action": "run", "code": "x = 1"}\n')
+        finally:
+            state_file.write_text(original)
+        assert "error" in reply, reply
+    assert command("repl", name, "--code", "print(kept)").stdout == "yes\n"
+    print("PASS deep JSON and refresh failures get errors; state survives", flush=True)
+
+    # C2-M2: a forked child without exec never keeps the session lock.
+    pidfile = directory / "forked.pid"
+    command(
+        "repl",
+        name,
+        "--code",
+        "import os, time\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(pid))\n",
+    )
+    forked = int(pidfile.read_text())
+    assert alive(forked)
+    time.sleep(1)
+    assert not locked(name), "a forked child kept the session lock"
+    os.kill(forked, 9)
+    print("PASS a forked child does not hold the lock", flush=True)
+
+    # C2-L1: late output appends after the cell's own output.
+    late = command(
+        "repl",
+        name,
+        "--code",
+        "import os\nos.system('(sleep 1; echo LATE) &')\nprint('A' * 9_000_000)\n",
+        timeout=120,
+    )
+    assert "[output truncated" in late.stdout
+    time.sleep(2)
+    logs = STATE / name / "spawn-logs"
+    newest = max(logs.glob("cell-*.out"), key=lambda path: path.stat().st_mtime)
+    with newest.open("rb") as kept_file:
+        head = kept_file.read(10)
+        kept_file.seek(-5, os.SEEK_END)
+        tail = kept_file.read()
+    assert head == b"A" * 10 and tail == b"LATE\n", (head, tail)
+    for _ in range(25):
+        command("repl", name, "--code", "pass")
+    assert len(list(logs.glob("cell-*.out"))) <= 20
+    print("PASS late output appends; old cell files are not kept forever", flush=True)
+
+    # C2-L3 / L4 / L5: one byte budget, filled as far as it goes.
+    huge = command(
+        "repl",
+        name,
+        "--code",
+        "raise RuntimeError('x' * 20_000_000)",
+        ok=False,
+        timeout=120,
+    )
+    assert "truncated" in huge.stderr and len(huge.stderr) < 2_000_000, len(huge.stderr)
+    mixed = command(
+        "repl",
+        name,
+        "--code",
+        "print('A' * 4_000_000 + '\\x01' * 4_000_000)",
+        timeout=120,
+    )
+    assert "[output truncated" in mixed.stdout and len(mixed.stdout) > 4_500_000, len(
+        mixed.stdout
+    )
+    accents = command("repl", name, "--code", "print('é' * 4_000_000)", timeout=120)
+    assert accents.stdout == "é" * 4_000_000 + "\n", len(accents.stdout)
+    assert command("repl", name, "--code", "print(kept)").stdout == "yes\n"
+    print("PASS the reply fits one budget and keeps as much output as fits", flush=True)
 
 
 def raw_request(name, payload, timeout=30):
@@ -90,6 +213,8 @@ def main(directory):
         late = recorded["apps"]["late"]["unit"]
         assert late in recorded["units"] and unit_active(late)
         print("PASS a unit launched during REPL shutdown stays recorded", flush=True)
+
+        check_2c(name, directory)
 
         # N1 hardening: something in the REPL holds the lock; stop still ends it.
         holder = directory / "holder.pid"
