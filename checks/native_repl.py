@@ -188,6 +188,49 @@ def main(directory):
         assert relative.stdout == f"from-child\n{caller / 'relative.png'}\n", relative
         print("PASS relative paths and subprocess output follow the caller", flush=True)
 
+        # R2: ocr(image=relative) reads the caller's file, not the worker's cwd.
+        font = subprocess.run(
+            ["fc-match", "-f", "%{file}", "sans-serif"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for word in ("Alpha", "Bravo"):
+            place = directory / word.lower()
+            place.mkdir()
+            subprocess.run(
+                [
+                    "magick",
+                    "-size",
+                    "420x120",
+                    "xc:white",
+                    "-font",
+                    font,
+                    "-fill",
+                    "black",
+                    "-pointsize",
+                    "56",
+                    "-annotate",
+                    "+20+85",
+                    word,
+                    "label.png",
+                ],
+                cwd=place,
+                check=True,
+            )
+            read = repl(
+                name, "print([b['text'] for b in ocr(image='label.png')])", cwd=place
+            )
+            assert word in read.stdout, (word, read.stdout)
+        print("PASS ocr(image=relative) reads the caller's file", flush=True)
+
+        # R3: output that grows when JSON-escaped is cut, not dropped.
+        flood = repl(name, "print('\\x01' * 3_000_000)\nprint('after')")
+        assert "[output truncated" in flood.stdout, flood.stdout[-200:]
+        assert len(flood.stdout) < 9 * 1024 * 1024
+        assert repl(name, "print('é' * 3)").stdout == "ééé\n"
+        print("PASS escaped output is truncated to fit the reply", flush=True)
+
         marker = directory / "child.pid"
         repl(
             name,

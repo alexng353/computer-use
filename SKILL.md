@@ -178,7 +178,10 @@ The cell comes from stdin or `--code` and runs in the command's working
 directory, so relative paths mean what they would in your shell. The command
 prints the cell's output (including output of subprocesses it runs), the value
 of a trailing expression, and one `[image] PATH` line per image the cell passed
-to `display()`; view those paths as you would a screenshot. A failing cell
+to `display()`; view those paths as you would a screenshot. Only output written
+while the cell runs comes back: a background child (`cmd &`) that keeps writing
+afterwards writes to that cell's file in `<session>/spawn-logs/cell-NNNN.out`.
+Very long output is cut to fit the reply (`[output truncated ...]`). A failing cell
 prints its traceback, exits 1 and keeps the REPL's state. Images go to the
 session directory unless `--output-dir` is given; save anything you need to keep.
 
@@ -189,7 +192,9 @@ state; if the command itself is killed, the REPL interrupts the cell. A cell
 that ignores the interrupt for 5 s is stopped with its REPL, and its state is
 lost. Set `--timeout` below your own shell timeout. Whenever a REPL is replaced
 (`--reset`, a crash, a stuck cell), stderr says `started a fresh REPL; previous
-state lost (reason)`; a REPL that is still running a cell is never replaced.
+state lost (reason)`; a REPL that is still running a cell is never replaced. If
+`stop` cannot take the session's lock within 10 s, it stops the REPL (which
+ends anything the REPL started) and says so.
 A cell returns only the images it displays: `--screenshot-directory` does not add
 an automatic capture after `repl`, so end a cell with `display(screenshot())` when
 you need to see the result.
@@ -282,9 +287,15 @@ directories alone. A session it cannot move is listed under `kept` with the
 error, and the run continues.
 
 `orphan_units` lists `computer-use-*` units that no session owns, each with its
-`state`; inactive ones are left out, and units of a session that appeared
-during the run are skipped. The real run resets failed orphans and lists them
-in `reset_units`. Before stopping an orphan yourself, check what it is and that
-no new session folder now carries its name.
+`state`; inactive ones are left out. A unit belongs to a session when its
+`state.json` records it, or when it is named `computer-use-<folder>-<6 hex>-…`
+for a session folder that exists when the units are listed (so a session that
+started during the run is skipped, and folder `a` never claims session `a-2`).
+Units under `computer-use-check-` belong to the repository's checks and are
+never reported. The real run resets failed orphans and lists them in
+`reset_units`. If listing units fails, `orphan_units` is `null` and
+`orphan_error` says why; the session report is still complete. A session with an
+unusable `state.json` is kept with the reason. Before stopping an orphan
+yourself, check what it is and that no new session folder now carries its name.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).
