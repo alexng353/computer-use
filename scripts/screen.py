@@ -12,6 +12,28 @@ ZOOM_MAX_SCALE = 8
 # Settling waits for this much unchanged screen, up to the cap.
 SETTLE_QUIET = 0.5
 SETTLE_CAP = 5.0
+SETTLE_MAX_MS = 30000
+# Larger zoom output takes too long to render and is useless to view.
+ZOOM_MAX_EDGE = 8192
+
+
+class Cancelled(RuntimeError):
+    """Settling stopped because the session is stopping."""
+
+
+def settle_milliseconds(value):
+    """argparse type for --settle: 1 to SETTLE_MAX_MS."""
+    import argparse
+
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if not 1 <= number <= SETTLE_MAX_MS:
+        raise argparse.ArgumentTypeError(
+            f"--settle takes 1 to {SETTLE_MAX_MS} milliseconds, not {value!r}"
+        )
+    return number
 
 
 def frame_digest(env):
@@ -25,18 +47,23 @@ def frame_digest(env):
     return hashlib.sha256(raw).digest()
 
 
-def wait_stable(env, timeout=SETTLE_CAP, quiet=SETTLE_QUIET, interval=0.05):
+def wait_stable(
+    env, timeout=SETTLE_CAP, quiet=SETTLE_QUIET, interval=0.05, cancelled=None
+):
     """Poll frames until none changes for `quiet` seconds; False at the cap.
 
     A change that starts later than `quiet` after the action is missed, so
-    delayed loads need a quiet window longer than their delay.
+    delayed loads need a quiet window longer than their delay. `cancelled()`
+    is checked on every poll and raises Cancelled when true.
     """
-    # A cap shorter than the quiet window could never report a settled screen.
-    timeout = max(timeout, 2 * quiet)
+    if timeout < quiet:
+        raise ValueError("timeout must be at least quiet, or it can never settle")
     deadline = time.monotonic() + timeout
     last = frame_digest(env)
     since = time.monotonic()
     while True:
+        if cancelled is not None and cancelled():
+            raise Cancelled("Settling cancelled because the session is stopping")
         now = time.monotonic()
         if now - since >= quiet:
             return True
@@ -48,9 +75,13 @@ def wait_stable(env, timeout=SETTLE_CAP, quiet=SETTLE_QUIET, interval=0.05):
             last, since = current, time.monotonic()
 
 
-def settle(env, milliseconds):
+def settle(env, milliseconds, cancelled=None):
     """The CLI's --settle=MS: wait for MS of unchanged screen, capped."""
-    return wait_stable(env, quiet=milliseconds / 1000)
+    quiet = milliseconds / 1000
+    # A cap shorter than the quiet window could never report a settled screen.
+    return wait_stable(
+        env, timeout=max(SETTLE_CAP, 2 * quiet), quiet=quiet, cancelled=cancelled
+    )
 
 
 def zoom(env, box, output, scale=None, size=None):
@@ -69,9 +100,14 @@ def zoom(env, box, output, scale=None, size=None):
         )
     if not 1 <= scale <= ZOOM_MAX_SCALE:
         raise ValueError(f"Zoom scale must be 1 to {ZOOM_MAX_SCALE}")
+    if max(width, height) * scale > ZOOM_MAX_EDGE:
+        raise ValueError(
+            f"Zoom output would be {width * scale}x{height * scale}; keep its long "
+            f"edge within {ZOOM_MAX_EDGE} px with a smaller box or --scale"
+        )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    result = subprocess.run(
         [
             "magick",
             "import",
@@ -92,7 +128,13 @@ def zoom(env, box, output, scale=None, size=None):
         ],
         env=env,
         capture_output=True,
-        check=True,
+        text=True,
+        check=False,
         timeout=10,
     )
+    if result.returncode:
+        raise RuntimeError(
+            f"magick could not write the zoom ({result.returncode}): "
+            + (result.stderr.strip() or "no error output")
+        )
     return str(output)

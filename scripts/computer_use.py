@@ -819,29 +819,57 @@ def screen_size(state):
 
 
 def settle(state, args):
-    """Wait out redraws after an action; a settled repl also returns its screen."""
+    """Wait out redraws after an action; a settled repl also returns its screen.
+
+    The action has already run, so a failure here only warns (never repeat
+    the action); `stop` cancels the wait like it cancels input and exec.
+    """
     env = dict(os.environ, **environment(state))
-    if not screen.settle(env, args.settle):
+    try:
+        if not screen.settle(
+            env, args.settle, cancelled=lambda: stop_marker(state).exists()
+        ):
+            print(
+                "computer-use: screen still changing at the settle cap; capturing anyway",
+                file=sys.stderr,
+            )
+    except screen.Cancelled:
+        raise RuntimeError(
+            f"The {args.action} ran, but its settle was cancelled because the "
+            "session is stopping"
+        ) from None
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(
-            "computer-use: screen still changing at the settle cap; capturing anyway",
+            f"computer-use: The {args.action} completed, but settling failed: "
+            f"{error}. Do not repeat it; inspect the screen instead",
             file=sys.stderr,
         )
     if args.action != "repl":
         return
-    # The REPL server may have written state.json during the cell.
-    state = repl.fresh(state)
-    if state.get("screenshot_directory"):
-        image = automatic_screenshot(state, "repl")
-    else:
-        directory = (
-            args.output_dir.expanduser().resolve()
-            if args.output_dir
-            else Path(state["directory"]) / "repl-images"
+    try:
+        # The REPL server may have written state.json during the cell.
+        state = repl.fresh(state)
+        if state.get("screenshot_directory"):
+            image = automatic_screenshot(state, "repl")
+        else:
+            directory = (
+                args.output_dir.expanduser().resolve()
+                if args.output_dir
+                else Path(state["directory"]) / "repl-images"
+            )
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            image = directory / f"settled-{time.time_ns()}.png"
+            capture(env, image)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        print(
+            f"computer-use: The cell completed, but its settled screenshot failed: "
+            f"{error}. Do not repeat the cell; take a screenshot instead",
+            file=sys.stderr,
         )
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        image = directory / f"settled-{time.time_ns()}.png"
-        capture(env, image)
+        return
     if image:
+        if not getattr(args, "output_ended_line", True):
+            print()
         print("[image] " + str(image))
 
 
@@ -958,11 +986,12 @@ def parser():
                 "--settle",
                 nargs="?",
                 const=int(screen.SETTLE_QUIET * 1000),
-                type=int,
+                type=screen.settle_milliseconds,
                 metavar="MS",
                 help="After the action, wait until the screen is unchanged for MS "
-                f"milliseconds (default {int(screen.SETTLE_QUIET * 1000)}; capped at "
-                f"{screen.SETTLE_CAP:g} s or twice MS) before any capture",
+                f"milliseconds (1 to {screen.SETTLE_MAX_MS}, default "
+                f"{int(screen.SETTLE_QUIET * 1000)}; capped at {screen.SETTLE_CAP:g} s "
+                "or twice MS) before any capture. Write --settle=MS",
             )
         if action == "start":
             sub.add_argument("--size", default="1440x1000")
@@ -1298,12 +1327,17 @@ def perform(state, args, command):
             args.timeout,
             reset=args.reset,
         )
-        sys.stdout.write(reply.get("stdout", ""))
+        output = reply.get("stdout", "")
+        sys.stdout.write(output)
         for image in reply.get("images", []):
             print("[image] " + image)
+        # A settled image after this must start on its own line.
+        args.output_ended_line = bool(reply.get("images")) or output.endswith("\n")
+        args.output_ended_line |= not output
         if reply.get("error"):
             sys.stderr.write(reply["error"])
-            raise SystemExit(1)
+        # Returned, not raised, so --settle still runs after a failed cell.
+        return 1 if reply.get("error") else 0
 
 
 if __name__ == "__main__":
