@@ -143,8 +143,10 @@ prints the cell's output (including output of subprocesses it runs), the value
 of a trailing expression, and one `[image] PATH` line per image the cell passed
 to `display()`; view those paths as you would a screenshot. Only output written
 while the cell runs comes back: a background child (`cmd &`) that keeps writing
-afterwards writes to that cell's file in `<session>/spawn-logs/cell-NNNN.out`.
-Very long output is cut to fit the reply (`[output truncated ...]`). A failing cell
+afterwards appends to that cell's file in `<session>/spawn-logs/cell-PID-NNNN.out`;
+the 20 newest cell files are kept. Very long output (over 8 MiB once encoded),
+error text (over 1 MiB) and image lists are cut to fit the reply and say so.
+Non-UTF-8 file names print as their own bytes. A failing cell
 prints its traceback, exits 1 and keeps the REPL's state. Images go to the
 session directory unless `--output-dir` is given; save anything you need to keep.
 

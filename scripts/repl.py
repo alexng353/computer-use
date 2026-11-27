@@ -31,6 +31,12 @@ SCRIPTS = Path(__file__).resolve().parent
 MAX_MESSAGE = 16 * 1024 * 1024
 # Cell output beyond this is cut so the reply stays under MAX_MESSAGE.
 MAX_OUTPUT = 8 * 1024 * 1024
+# Error text and image paths get their own share, so the whole reply fits.
+MAX_ERROR = 1024 * 1024
+MAX_IMAGES = 1024 * 1024
+# Cell output files kept per session (late writers of older cells still land
+# there until it is pruned).
+KEEP_CELL_FILES = 20
 # Time an interrupted cell gets to finish before its REPL is stopped.
 GRACE = 5.0
 # The server serves one connection at a time, so a request must arrive quickly.
@@ -50,13 +56,66 @@ def notice(message):
     print("computer-use: " + message, file=sys.stderr, flush=True)
 
 
+# One codec for requests and replies. Text may hold lone surrogates (non-UTF-8
+# file names, surrogateescape'd argv); surrogatepass carries them both ways.
+def wire(value):
+    return json.dumps(value, ensure_ascii=False).encode("utf-8", "surrogatepass")
+
+
+def unwire(data):
+    return json.loads(bytes(data).decode("utf-8", "surrogatepass"))
+
+
+def to_bytes(text):
+    """Bytes for the terminal: surrogateescape'd names become their bytes again."""
+    try:
+        return text.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace")
+
+
+def fit_text(text, budget, marker):
+    """Longest prefix of text whose encoding, with marker, fits budget bytes."""
+    if len(wire(text)) <= budget:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(wire(text[:middle] + marker)) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + marker
+
+
+def fit_reply(reply):
+    """Cut a reply's stdout, error and images so the whole of it fits."""
+    fitted = dict(reply)
+    images, kept = list(reply.get("images") or []), []
+    for image in images:
+        if len(wire([*kept, image])) > MAX_IMAGES:
+            break
+        kept.append(image)
+    fitted["images"] = kept
+    error = reply.get("error")
+    if len(kept) < len(images):
+        error = (error or "") + f"\n[{len(images) - len(kept)} images left out]\n"
+    if error is not None:
+        fitted["error"] = fit_text(error, MAX_ERROR, "\n[error truncated]\n")
+    if "stdout" in reply:
+        fitted["stdout"] = fit_text(
+            reply["stdout"], MAX_OUTPUT, "\n[output truncated to fit the reply]\n"
+        )
+    return fitted
+
+
 def exchange(state, message, timeout):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(timeout)
         connection.connect(str(socket_path(state)))
-        connection.sendall(json.dumps(message).encode() + b"\n")
+        connection.sendall(wire(message) + b"\n")
         with connection.makefile("rb") as response:
-            return json.loads(response.readline(MAX_MESSAGE))
+            return unwire(response.readline(MAX_MESSAGE))
 
 
 def fresh(state):
@@ -167,8 +226,7 @@ def call(state, request, start_service, lock, stopping, timeout, reset=False):
     waits for it to end before returning, so the lock is never released while
     the cell can still drive the desktop.
     """
-    payload = json.dumps({"action": "run", **request}, ensure_ascii=False).encode()
-    payload += b"\n"
+    payload = wire({"action": "run", **request}) + b"\n"
     if len(payload) > MAX_MESSAGE:
         raise RuntimeError("Cell request too large (over 16 MiB)")
     state = ensure(state, start_service, reset=reset)
@@ -224,7 +282,7 @@ def call(state, request, start_service, lock, stopping, timeout, reset=False):
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
-    reply = json.loads(received)
+    reply = unwire(received)
     if reply.get("interrupted"):
         reply["error"] = (
             f"Cell interrupted because {reason or 'of an interrupt'}; REPL state is kept\n"
@@ -587,6 +645,16 @@ HELPERS = (
 )
 
 RUNNING = threading.Event()
+# Descriptors a client passed for the running cell (its session lock).
+CELL_FDS = set()
+
+
+def close_cell_fds():
+    # A child forked without exec must not keep the session lock.
+    for fd in list(CELL_FDS):
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    CELL_FDS.clear()
 
 
 def interrupt_cell(_signum, _frame):
@@ -621,7 +689,8 @@ def captured_output(path, collected):
     streams = sys.stdout, sys.stderr
     saved = os.dup(1), os.dup(2)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with path.open("w+b") as capture:
+    # Append mode: a late writer always lands after what the cell wrote.
+    with path.open("a+b") as capture:
         os.dup2(capture.fileno(), 1)
         os.dup2(capture.fileno(), 2)
         sys.stdout = open(1, "w", buffering=1, errors="replace", closefd=False)
@@ -637,25 +706,16 @@ def captured_output(path, collected):
             os.dup2(saved[1], 2)
             os.close(saved[0])
             os.close(saved[1])
-            capture.seek(0)
-            output = capture.read(MAX_OUTPUT + 1)
-            collected.append(
-                fit_output(output[:MAX_OUTPUT].decode(errors="replace"), output)
-            )
+            output = os.pread(capture.fileno(), MAX_OUTPUT + 1, 0)
+            # fit_reply cuts by encoded size; this only bounds what is read.
+            collected.append(output.decode(errors="replace"))
 
 
-def fit_output(text, raw):
-    """Cut text so its JSON encoding stays within MAX_OUTPUT bytes."""
-    marker = "\n[output truncated to fit the reply]\n"
-    size = len(json.dumps(text, ensure_ascii=False).encode())
-    if size <= MAX_OUTPUT and len(raw) <= MAX_OUTPUT:
-        return text
-    keep = len(text)
-    while size > MAX_OUTPUT - len(marker) * 6:
-        # Escaping can grow a character up to six bytes; shrink until it fits.
-        keep = int(keep * (MAX_OUTPUT - len(marker) * 6) / size * 0.95)
-        size = len(json.dumps(text[:keep], ensure_ascii=False).encode())
-    return text[:keep] + marker
+def prune_cell_files(directory):
+    files = sorted(directory.glob("cell-*.out"), key=lambda path: path.stat().st_mtime)
+    for old in files[:-KEEP_CELL_FILES]:
+        with contextlib.suppress(OSError):
+            old.unlink()
 
 
 def watch_client(connection, done):
@@ -679,13 +739,18 @@ def watch_client(connection, done):
 def read_request(connection):
     """Return (message, lock fd or None) from one bounded request."""
     connection.settimeout(REQUEST_TIMEOUT)
-    data, fds, _flags, _address = socket.recv_fds(connection, 1, 2)
+    # CLOEXEC from the moment of receipt: no exec'd child, even one started
+    # by a thread left from an earlier cell, can inherit the lock.
+    data, fds, _flags, _address = socket.recv_fds(
+        connection, 1, 2, socket.MSG_CMSG_CLOEXEC
+    )
     for fd in fds:
-        # A child the cell starts (`cmd &`) must never inherit the session lock.
         os.set_inheritable(fd, False)
     for extra in fds[1:]:
         os.close(extra)
     lock = fds[0] if fds else None
+    if lock is not None:
+        CELL_FDS.add(lock)
     try:
         buffer = bytearray(b"" if data == b"L" else data)
         too_large = False
@@ -701,11 +766,12 @@ def read_request(connection):
                 buffer += chunk
         if too_large:
             raise ValueError("request too large")
-        message = json.loads(buffer)
+        message = unwire(buffer)
         check_request(message)
         return message, lock
     except BaseException:
         if lock is not None:
+            CELL_FDS.discard(lock)
             os.close(lock)
         raise
 
@@ -724,7 +790,7 @@ def check_request(message):
 def run_cell(session, namespace, message, connection):
     try:
         session.refresh(message.get("image_dir"))
-    except (OSError, ValueError, RuntimeError) as exc:
+    except Exception as exc:  # noqa: BLE001 - A bad state file is the reply, not a crash.
         return {"error": f"Bad request: {exc}"}
     with contextlib.suppress(OSError, TypeError):
         os.chdir(message.get("cwd"))
@@ -736,11 +802,9 @@ def run_cell(session, namespace, message, connection):
     threading.Thread(target=watch_client, args=(connection, done), daemon=True).start()
     collected, error, interrupted = [], None, False
     session.counter += 1
-    output = (
-        Path(session.state["directory"])
-        / "spawn-logs"
-        / f"cell-{session.counter:04d}.out"
-    )
+    logs = Path(session.state["directory"]) / "spawn-logs"
+    # The pid keeps a restarted REPL from appending to an older cell's file.
+    output = logs / f"cell-{os.getpid()}-{session.counter:04d}.out"
     try:
         with captured_output(output, collected):
             RUNNING.set()
@@ -758,6 +822,7 @@ def run_cell(session, namespace, message, connection):
         error = "".join(traceback.format_exception(exc))
     finally:
         done.set()
+    prune_cell_files(logs)
     return {
         "stdout": collected[0] if collected else "",
         "images": session.images,
@@ -772,6 +837,7 @@ def serve(name):
     namespace = {"__name__": "__repl__", "session": session}
     namespace.update({helper: getattr(session, helper) for helper in HELPERS})
     signal.signal(signal.SIGINT, interrupt_cell)
+    os.register_at_fork(after_in_child=close_cell_fds)
     path = socket_path(session.state)
     path.unlink(missing_ok=True)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
@@ -782,27 +848,30 @@ def serve(name):
             lock = None
             with connection:
                 try:
-                    message, lock = read_request(connection)
-                except (OSError, ValueError) as error:
-                    reply = {"error": f"Bad request: {error}"}
-                else:
-                    if message.get("action") == "ping":
-                        reply = {"ready": True}
-                    elif message.get("action") == "run" and isinstance(
-                        message.get("code"), str
-                    ):
-                        reply = run_cell(session, namespace, message, connection)
+                    try:
+                        message, lock = read_request(connection)
+                    except Exception as error:  # noqa: BLE001 - e.g. RecursionError on deep JSON.
+                        reply = {"error": f"Bad request: {error!r}"[:4096]}
                     else:
-                        reply = {"error": "Bad request: unknown action"}
-                try:
-                    connection.sendall(
-                        json.dumps(reply, ensure_ascii=False).encode() + b"\n"
+                        if message.get("action") == "ping":
+                            reply = {"ready": True}
+                        elif message.get("action") == "run":
+                            reply = run_cell(session, namespace, message, connection)
+                        else:
+                            reply = {"error": "Bad request: unknown action"}
+                    data = wire(fit_reply(reply))
+                except Exception as error:  # noqa: BLE001 - Any failure here is a reply; the REPL keeps serving.
+                    data = wire(
+                        {"error": f"REPL could not build its reply: {error!r}"[:4096]}
                     )
+                try:
+                    connection.sendall(data + b"\n")
                 except OSError:
                     pass
                 finally:
                     # Releasing our share of the lock lets the next command run.
                     if lock is not None:
+                        CELL_FDS.discard(lock)
                         os.close(lock)
 
 
