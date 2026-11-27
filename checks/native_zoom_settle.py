@@ -189,7 +189,9 @@ def stop_during(name, directory, args, env):
     command("stop", name, timeout=60)
     stopped = time.monotonic() - started
     _, stderr = waiting.communicate(timeout=30)
-    assert stopped < 5, (args, stopped)
+    # The capture's own 5 s cap would end it about 3.5 s after stop; a real
+    # cancel ends it at once.
+    assert stopped < 2.5, (args, stopped)
     assert waiting.returncode != 0 and "stopping" in stderr, (args, stderr)
     assert not fakes_running(directory), fakes_running(directory)
     assert not locked(name), "lock still held after stop"
