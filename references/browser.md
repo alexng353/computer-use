@@ -6,8 +6,9 @@ Use native accessibility targets by default. When browser instrumentation is pro
 
 ```bash
 virtual-browser start native-task --no-cdp \
-  --source-profile ~/.config/net.imput.helium --url https://example.com
-computer-use screenshot native-task --output /absolute/path/controls.png
+  --source-profile ~/.config/net.imput.helium --url https://example.com \
+  --screenshot-directory /absolute/path/screenshots
+# View the returned screenshot before choosing a reference.
 computer-use query native-task @a13
 computer-use click native-task @a13
 ```
@@ -22,7 +23,7 @@ Omit `--source-profile` for a fresh browser without logins. For authorized acces
 
 The helper copies Local State and preferences and snapshots Cookies with SQLite backup, including committed WAL contents. It does not modify the source profile or copy saved passwords, browsing history, extensions, or sessions. The browser decrypts cookies using the existing unlocked keyring through the filtered bus. Login state is temporary and removed with the session.
 
-Attach agent-browser once using `--session NAME --cdp PORT`, then use only `--session NAME` for later actions. Refresh refs after navigation or rerenders and verify field values before saving. In agent-browser 0.31.1, an immediate snapshot can precede a Google UI update, and iframe text waits may time out despite visible content. Inspect a fresh snapshot instead of repeating a mutation.
+Attach agent-browser once using `--session NAME --cdp PORT`, then use only `--session NAME` for later actions. Automatic computer-use screenshots cover its own CLI interactions; agent-browser operations still need their own snapshots. Refresh refs after navigation or rerenders and verify field values before saving. In agent-browser 0.31.1, an immediate snapshot can precede a Google UI update, and iframe text waits may time out despite visible content. Inspect a fresh snapshot instead of repeating a mutation.
 
 Use agent-browser screenshots for web content and `computer-use screenshot` for chrome and native dialogs. Prefer `agent-browser upload` when the file input is accessible.
 

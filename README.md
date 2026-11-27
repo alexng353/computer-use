@@ -74,17 +74,20 @@ not depend on that skill or on Codex's internal APIs.
 ## Capture, locate, click
 
 ```bash
-computer-use start demo --size 1440x1000
+computer-use start demo --size 1440x1000 --screenshot-directory /tmp/demo-images
 computer-use launch demo --id app -- your-x11-app
-computer-use screenshot demo --output /tmp/screen.png
-# View the image, then choose a badge:
+# View the returned screenshot, then choose a badge:
 computer-use query demo @a13
 computer-use click demo @a13
-computer-use screenshot demo --output /tmp/after.png
+# click returns the next screenshot's path.
 computer-use stop demo
 ```
 
-Screenshots print only the image path. Target names and geometry stay in the owner-only session directory. `query` prints one target as JSON: `ref`, `text`, `confidence`, `bounds`, `center`, and source-image information. Bounds are `[x1, y1, x2, y2]` with exclusive right/bottom edges; center is `[x, y]`, all in original screenshot pixels from the top left. The default bounds describe accessible controls; `--targets text` returns OCR text bounds instead.
+`--screenshot-directory` saves a uniquely named, owner-only PNG after session creation and every `launch`, `browser`, `input`, `exec`, `click`, and `clipboard set`. JSON commands include its absolute path in `screenshot`; other interactions print the path on the final stdout line. Command output and exit codes are preserved, including nonzero exits. `status` includes the latest automatic screenshot. Read-only commands retain their existing output and references. Choose a directory outside the session's temporary directory to keep images after `stop`. Without this setting, existing commands keep their previous behavior and require explicit screenshots.
+
+Automatic screenshots use accessibility targets; empty desktops and sessions without accessibility produce raw images. If annotation fails, a warning accompanies a raw image with no references. Focus-change retries repeat only capture, never input. Inspect the image: an asynchronous page load may still be in progress. If capture itself fails after input, the error reports that the interaction already completed so it is not accidentally repeated.
+
+Explicit `screenshot --output /absolute/path.png` still prints only the image path. Target names and geometry stay in the owner-only session directory. `query` prints one target as JSON: `ref`, `text`, `confidence`, `bounds`, `center`, and source-image information. Bounds are `[x1, y1, x2, y2]` with exclusive right/bottom edges; center is `[x, y]`, all in original screenshot pixels from the top left. The default bounds describe accessible controls; `--targets text` returns OCR text bounds instead.
 
 References advance through `@a1`, `@b1`, …, `@g1`, then wrap. A new capture replaces the reference map; all `input`, `exec`, launch/browser, clipboard-set, and click operations invalidate it. Queries do not invalidate it and return cached coordinates; they do not recheck live pixels. Use a fresh screenshot when the app may have changed. A click checks the current pixels within its target bounds against the captured pixels before sending native input; accessibility targets also recheck focus and semantics. A changed target rejects the click. Repeated letters are intentionally short visual hints, not globally unique capture IDs: always use the latest image, including after wraparound. Pixels alone cannot distinguish two logically different controls with identical appearance.
 
@@ -136,9 +139,9 @@ computer-use query accessible-demo @a13
 computer-use click accessible-demo @a13
 ```
 
-The browser shortcut also accepts `virtual-browser start accessible-demo --no-cdp --url https://example.com`. On an existing session, `launch --accessibility` or `browser --accessibility` enables the bus for that launch and future launches. Existing apps must be relaunched to acquire the new environment. The browser helper enables Chromium's native accessibility bridge and renderer support; when launching Chromium yourself with `launch`, additionally pass `--force-renderer-accessibility=complete`.
+The browser shortcut also accepts `virtual-browser start accessible-demo --no-cdp --url https://example.com --screenshot-directory /tmp/demo-images`. On an existing session, `launch --accessibility` or `browser --accessibility` enables the bus for that launch and future launches. Existing apps must be relaunched to acquire the new environment. The browser helper enables Chromium's native accessibility bridge and renderer support; when launching Chromium yourself with `launch`, additionally pass `--force-renderer-accessibility=complete`.
 
-Use `computer-use start NAME --no-accessibility` for a desktop without the native accessibility dependencies, then select `--targets text`, `--targets icons` or `--raw` explicitly. Existing desktops without a private bus need `launch --accessibility` or `browser --accessibility` and an app relaunch before using the new screenshot default. Screenshot modes do not fall back silently.
+Use `computer-use start NAME --no-accessibility` for a desktop without the native accessibility dependencies, then select `--targets text`, `--targets icons` or `--raw` explicitly. Existing desktops without a private bus need `launch --accessibility` or `browser --accessibility` and an app relaunch before using the new screenshot default. Explicit screenshot modes do not fall back; automatic captures report any fallback to raw.
 
 `setup-accessibility` checks dependencies without installing packages: `/usr/bin/python3` needs PyGObject, AT-SPI introspection and Pillow, alongside `at-spi2-core`, `dbus-daemon`, `busctl`, `xdotool` and libX11. On Arch the Python packages are `python-gobject` and `python-pillow`. This mode needs neither the OCR runtime nor the icon model. Each enabled session owns a private accessibility bus, registry and rendering worker. Each capture or click verification uses a fresh native reader with an eight-second timeout so libatspi cannot retain destroyed objects across reads. Host portal and accessibility access remain excluded from the filtered session bus.
 
@@ -159,6 +162,7 @@ ruff format --check scripts checks
 ~/.local/share/computer-use/ocr-venv/bin/python checks/ocr_contracts.py
 ~/.local/share/computer-use/ocr-venv/bin/python checks/icon_contracts.py
 python checks/accessibility_contracts.py
+python checks/automatic_screenshots.py
 python checks/native_ocr.py
 # After setup-ocr and setup-icons:
 python checks/native_icons.py

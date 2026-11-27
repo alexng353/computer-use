@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -218,8 +219,12 @@ def stop(state, remove=True):
         shutil.rmtree(state["directory"])
 
 
-def start(name, size, accessibility=True):
+def start(name, size, accessibility=True, screenshot_directory=None):
     require("Xvfb", "xauth", "xdpyinfo", "systemd-run", "xdg-dbus-proxy")
+    if screenshot_directory is not None:
+        require("magick")
+        screenshot_directory = screenshot_directory.expanduser().resolve()
+        screenshot_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not re.fullmatch(r"[1-9][0-9]{2,3}x[1-9][0-9]{2,3}", size):
         raise RuntimeError("--size must be WIDTHxHEIGHT, from 100 to 9999 pixels")
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -238,6 +243,8 @@ def start(name, size, accessibility=True):
         "units": [],
         "apps": {},
     }
+    if screenshot_directory is not None:
+        state["screenshot_directory"] = str(screenshot_directory)
     save(state)
     try:
         number = next(
@@ -516,6 +523,89 @@ def status(state):
     }
 
 
+def capture_image(state, output):
+    require("magick")
+    run(
+        "magick",
+        "import",
+        "-window",
+        "root",
+        str(output),
+        env=dict(os.environ, **environment(state)),
+    )
+
+
+def automatic_screenshot(state, action):
+    directory = state.get("screenshot_directory")
+    if directory is None or stop_marker(state).exists():
+        return None
+    destination = Path(directory)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, filename = tempfile.mkstemp(
+        prefix=f"{state['name']}-{action}-", suffix=".png", dir=destination
+    )
+    os.close(descriptor)
+    output = Path(filename)
+    raw = not state.get("accessibility_bus") or not state["apps"]
+    try:
+        for attempt in range(3):
+            if stop_marker(state).exists():
+                output.unlink(missing_ok=True)
+                return None
+            try:
+                ocr_targets.screenshot(
+                    state,
+                    output,
+                    lambda path: capture_image(state, path),
+                    service,
+                    raw=raw,
+                    target_mode="accessibility",
+                )
+                break
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as error:
+                # Navigation can replace the focused window during annotation.
+                # Retry the observation only; the interaction already happened.
+                if "Focused window changed" in str(error) and attempt < 2:
+                    continue
+                if raw:
+                    raise
+                print(
+                    f"computer-use: Automatic annotations unavailable ({error}); "
+                    "returning a raw screenshot without references",
+                    file=sys.stderr,
+                )
+                ocr_targets.screenshot(
+                    state,
+                    output,
+                    lambda path: capture_image(state, path),
+                    service,
+                    raw=True,
+                )
+                break
+        state["screenshot"] = str(output)
+        save(state)
+        return str(output)
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+
+
+def print_result(result, screenshot=None):
+    if isinstance(result, dict):
+        print(
+            json.dumps(
+                result | ({"screenshot": screenshot} if screenshot else {}), indent=2
+            )
+        )
+    elif screenshot:
+        print(("\n" if isinstance(result, int) else "") + screenshot, flush=True)
+
+
 def parser():
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="action", required=True)
@@ -546,6 +636,11 @@ def parser():
         sub.add_argument("name", type=identifier)
         if action == "start":
             sub.add_argument("--size", default="1440x1000")
+            sub.add_argument(
+                "--screenshot-directory",
+                type=Path,
+                help="Save and return a new screenshot after every interaction",
+            )
             sub.add_argument(
                 "--accessibility",
                 action=argparse.BooleanOptionalAction,
@@ -638,12 +733,20 @@ def main():
         return
     if args.action == "start":
         with interaction_lock(args.name):
-            print(
-                json.dumps(
-                    start(args.name, args.size, accessibility=args.accessibility),
-                    indent=2,
-                )
+            state = start(
+                args.name,
+                args.size,
+                accessibility=args.accessibility,
+                screenshot_directory=args.screenshot_directory,
             )
+            try:
+                screenshot = automatic_screenshot(state, "start")
+            except Exception as error:
+                raise RuntimeError(
+                    f"Session {args.name!r} started, but its screenshot failed: {error}. "
+                    "Inspect the session before starting it again"
+                ) from error
+            print_result(state, screenshot)
         return
     state = load(args.name)
     if args.action == "status":
@@ -661,7 +764,48 @@ def main():
         if stop_marker(state).exists():
             raise RuntimeError("Session is stopping")
         check_session(state)
-        perform(state, args, command)
+        interaction = args.action in [
+            "launch",
+            "browser",
+            "exec",
+            "input",
+            "click",
+        ] or (args.action == "clipboard" and args.operation == "set")
+        try:
+            result = perform(state, args, command)
+        except Exception:
+            if interaction:
+                try:
+                    print_result(None, automatic_screenshot(state, args.action))
+                except (
+                    OSError,
+                    ValueError,
+                    RuntimeError,
+                    subprocess.SubprocessError,
+                ) as error:
+                    print(
+                        f"computer-use: Could not capture after failed interaction: {error}",
+                        file=sys.stderr,
+                    )
+            raise
+        screenshot = None
+        if interaction:
+            try:
+                screenshot = automatic_screenshot(state, args.action)
+            except Exception as error:
+                if isinstance(result, int) and result != 0:
+                    print(
+                        f"computer-use: Could not capture after failed command: {error}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(result) from None
+                raise RuntimeError(
+                    f"Interaction completed, but its screenshot failed: {error}. "
+                    "Inspect the session before repeating the interaction"
+                ) from error
+        print_result(result, screenshot)
+        if isinstance(result, int):
+            raise SystemExit(result)
 
 
 def perform(state, args, command):
@@ -670,23 +814,22 @@ def perform(state, args, command):
     env = dict(os.environ, **environment(state))
 
     def capture(output):
-        require("magick")
-        run("magick", "import", "-window", "root", str(output), env=env)
+        capture_image(state, output)
 
     if args.action in ["launch", "browser", "exec", "input"] or (
         args.action == "clipboard" and args.operation == "set"
     ):
         ocr_targets.invalidate(state)
     if args.action == "launch":
-        print(json.dumps(launch(state, args.id, command), indent=2))
+        return launch(state, args.id, command)
     elif args.action == "browser":
-        print(json.dumps(browser(state, args), indent=2))
+        return browser(state, args)
     elif args.action == "viewer":
-        print(json.dumps(viewer(state), indent=2))
+        return viewer(state)
     elif args.action in ["exec", "input"]:
         if args.action == "input":
             command = ["xdotool", *command]
-        raise SystemExit(run_interruptible(state, command, env))
+        return run_interruptible(state, command, env)
     elif args.action == "screenshot":
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)

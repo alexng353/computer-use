@@ -47,11 +47,13 @@ This separates display, input, clipboard, and temporary browser profiles. Apps s
 Choose a unique task name. Commands refuse to overwrite an existing session.
 
 ```bash
-computer-use start invoice-task --size 1440x1000
+computer-use start invoice-task --size 1440x1000 \
+  --screenshot-directory /absolute/path/screenshots
 computer-use launch invoice-task --id dialog -- zenity --entry --title='Invoice note'
 computer-use windows invoice-task
-computer-use screenshot invoice-task --output /absolute/path/desktop.png
 ```
+
+Set `--screenshot-directory` when creating the session. `start`, `launch`, and `browser` return JSON with the new image's absolute path in `screenshot`. Every `input`, `exec`, `click`, and `clipboard set` returns a fresh image path on the final stdout line; `input`/`exec` keep their command output and exit code. View that image before choosing the next reference. Read-only `query`, `windows`, `status`, and `clipboard get` keep their existing output and references. Sessions started without the option require explicit screenshots.
 
 `launch` starts a persistent process. `exec NAME -- COMMAND ...` runs a short command in the same display environment and returns its exit status. It is useful for inspection; use `launch` for apps so cleanup owns their processes. Launch arguments are passed directly, without a shell.
 
@@ -66,7 +68,7 @@ There is no window manager by default. `windowfocus`, `windowraise`, `windowmove
 Accessibility annotations are the default. New desktops enable their private accessibility bus automatically, and the browser helper enables Chromium's native accessibility support. Run `computer-use setup-accessibility` to check the system dependencies; it does not install packages.
 
 ```bash
-computer-use screenshot invoice-task --output /absolute/path/desktop.png
+# View the screenshot returned by the last interaction, then choose its badge:
 computer-use query invoice-task @a13
 computer-use click invoice-task @a13
 ```
@@ -75,7 +77,9 @@ View the returned image and choose a letter-number badge from it. Screenshots pr
 
 `query` reads the current cached target. `click` rechecks focus, target semantics, bounds and pixels, then moves to the center and clicks through native X11 input. Inspect the screenshot before clicking: Chromium can return approximate hit-test results, so a badge does not prove a web control is unobscured. Hidden/disabled nodes, duplicate controls and centers obscured by higher native windows are excluded. Each read uses a fresh native process to avoid stale accessibility objects after navigation.
 
-After clicking, typing, scrolling, launching an app, or another `input`/`exec` command, take a fresh screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. Failed click verification retires references and requires recapture.
+After each interaction, inspect its returned screenshot before using references again. Each annotated capture advances its letter (`a`, `b`, …, `g`, then `a`); only the current capture's references are accepted. Letters repeat after seven captures, so always choose from the latest image. Failed click verification also returns a fresh screenshot when possible. Take an explicit screenshot when the page changes after a capture or the session has no screenshot directory.
+
+Automatic captures use accessibility annotations. An empty desktop or a session without accessibility returns a raw image. If annotation fails, the helper warns and returns a raw image without references; use an explicit text/icon capture as needed. Focus-change retries repeat only the capture. A screenshot does not establish that an asynchronous page load has finished. If capture itself fails after an interaction, inspect the session before repeating that interaction.
 
 On crowded screens, badges may use an added gutter on the right. The original screen stays at its original scale and top-left position. Gutter pixels are not desktop coordinates; use `query` or `click` with the badge reference to target its original control.
 
@@ -131,7 +135,8 @@ agent-browser --session invoice-task snapshot -i
 For a browser-only task, the shortcut creates both desktop and browser:
 
 ```bash
-virtual-browser start research-task --no-cdp --url https://example.com
+virtual-browser start research-task --no-cdp --url https://example.com \
+  --screenshot-directory /absolute/path/screenshots
 ```
 
 Both commands use the same session registry. `computer-use status`, `screenshot`, and `stop` work with sessions created by either command.
@@ -169,6 +174,6 @@ agent-browser --session invoice-task close
 computer-use stop invoice-task
 ```
 
-Save requested artifacts outside the session directory first. Stop cancels pending `input`/`exec` commands and terminates the recorded services, then removes the session files and login profiles. It leaves Alex's existing browser and apps running. Verify the saved document or website result before claiming completion, and clean up task-owned desktops afterward.
+Choose a screenshot directory outside the temporary session directory to retain the images after cleanup. Stop cancels pending `input`/`exec` commands and terminates the recorded services, then removes the session files and login profiles. It leaves external screenshots and Alex's existing browser and apps in place. Verify the saved document or website result before claiming completion, and clean up task-owned desktops afterward.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).
