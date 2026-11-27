@@ -825,20 +825,28 @@ def settle(state, args):
     the action); `stop` cancels the wait like it cancels input and exec.
     """
     env = dict(os.environ, **environment(state))
+
+    def stopping():
+        return stop_marker(state).exists()
+
+    def cancelled_error():
+        # Never report success for a command whose session is stopping.
+        return RuntimeError(
+            f"The {args.action} ran, but its settle was cancelled because the "
+            "session is stopping"
+        )
+
     try:
-        if not screen.settle(
-            env, args.settle, cancelled=lambda: stop_marker(state).exists()
-        ):
+        if not screen.settle(env, args.settle, cancelled=stopping):
             print(
                 "computer-use: screen still changing at the settle cap; capturing anyway",
                 file=sys.stderr,
             )
     except screen.Cancelled:
-        raise RuntimeError(
-            f"The {args.action} ran, but its settle was cancelled because the "
-            "session is stopping"
-        ) from None
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise cancelled_error() from None
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        if stopping():
+            raise cancelled_error() from None
         print(
             f"computer-use: The {args.action} completed, but settling failed: "
             f"{error}. Do not repeat it; inspect the screen instead",
@@ -846,6 +854,8 @@ def settle(state, args):
         )
     if args.action != "repl":
         return
+    if stopping():
+        raise cancelled_error()
     try:
         # The REPL server may have written state.json during the cell.
         state = repl.fresh(state)
@@ -859,8 +869,12 @@ def settle(state, args):
             )
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             image = directory / f"settled-{time.time_ns()}.png"
-            capture(env, image)
+            screen.capture_to(env, image, cancelled=stopping)
+    except screen.Cancelled:
+        raise cancelled_error() from None
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        if stopping():
+            raise cancelled_error() from None
         print(
             f"computer-use: The cell completed, but its settled screenshot failed: "
             f"{error}. Do not repeat the cell; take a screenshot instead",
@@ -1203,17 +1217,18 @@ def main():
         if interaction:
             try:
                 screenshot = automatic_screenshot(state, args.action)
-            except Exception as error:
-                if isinstance(result, int) and result != 0:
-                    print(
-                        f"computer-use: Could not capture after failed command: {error}",
-                        file=sys.stderr,
-                    )
-                    raise SystemExit(result) from None
-                raise RuntimeError(
-                    f"Interaction completed, but its screenshot failed: {error}. "
-                    "Inspect the session before repeating the interaction"
-                ) from error
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as error:
+                # The action already happened: report it and keep its status.
+                print(
+                    f"computer-use: The {args.action} completed, but its screenshot "
+                    f"failed: {error}. Do not repeat it; take a screenshot instead",
+                    file=sys.stderr,
+                )
         print_result(result, screenshot)
         if isinstance(result, int):
             raise SystemExit(result)
