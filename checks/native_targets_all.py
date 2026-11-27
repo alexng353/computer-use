@@ -9,6 +9,7 @@ Requires Helium, setup-ocr and setup-icons.
 import json
 import os
 import secrets
+import socket
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,12 @@ HTML = """<!doctype html><title>Targets all</title>
 a{color:#1d4ed8} #settings{width:72px;height:72px;border:none;border-radius:14px;
 background:#e5e7eb;margin:30px 0;display:block}
 canvas{display:block}</style>
+<div id="like" aria-hidden="true" onclick="say('Liked')"
+style="position:fixed;right:80px;top:120px;width:72px;height:72px;border:2px solid #6b7280;
+border-radius:12px;display:flex;align-items:center;justify-content:center;background:#f9fafb">
+<svg width="40" height="40" viewBox="0 0 24 24"><path fill="#374151"
+d="M12 21l-1.5-1.3C5 15 2 12.3 2 8.5 2 5.4 4.4 3 7.5 3c1.7 0 3.4.8 4.5 2.1C13.1 3.8
+14.8 3 16.5 3 19.6 3 22 5.4 22 8.5c0 3.8-3 6.5-8.5 11.2z"/></svg></div>
 <h1 id="status">Ready</h1>
 <p><a href="#guide" onclick="say('Guide opened')">Read the guide</a></p>
 <button id="settings" aria-label="Settings" onclick="say('Settings opened')">
@@ -146,9 +153,58 @@ def main(directory):
             assert expected in seen, (label_name, seen)
             command("query", name, "@" + badge["ref"], ok=False)
         print("PASS each merged badge clicks with its own verification")
+
+        # A control only the icon detector finds gets one clickable visual badge.
+        def in_corner(target):
+            # Right of the page content and below the browser's toolbar.
+            x, y = target["center"]
+            return x >= 820 and y >= 140
+
+        targets = snapshot(name, directory, "all")["targets"]
+        like = [t for t in targets if in_corner(t)]
+        assert len(like) == 1 and like[0]["kind"] == "visual", like
+        assert not any(in_corner(t) for t in accessible + text), "not icon-only"
+        command("click", name, "@" + like[0]["ref"], timeout=60)
+        command("repl", name, "--code", "wait_stable(timeout=5, quiet=0.5)")
+        assert "Liked" in status_text(name, directory)
+        print("PASS an icon-only control gets one visual badge that clicks")
+
+        # The OCR worker keeps its 64 KiB limit for everything but annotate.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+            raw.settimeout(30)
+            raw.connect(str(STATE / name / "ocr.sock"))
+            raw.sendall(
+                json.dumps({"action": "ping", "pad": "x" * 100_000}).encode() + b"\n"
+            )
+            reply = json.loads(raw.makefile("rb").readline())
+        assert "too large" in reply.get("error", ""), reply
+        print("PASS the OCR worker refuses large requests other than annotate")
     finally:
         if (STATE / name).exists():
             command("stop", name)
+
+    # Without accessibility, --targets all says what it skipped and why.
+    bare = "check-allbare-" + secrets.token_hex(3)
+    try:
+        command("start", bare, "--size", "640x480", "--no-accessibility")
+        shot = command(
+            "screenshot",
+            bare,
+            "--targets",
+            "all",
+            "--output",
+            str(directory / "bare.png"),
+            timeout=120,
+        )
+        assert "skipped accessibility: this session has no accessibility bus" in (
+            shot.stderr
+        ), shot.stderr
+        recorded = json.loads((STATE / bare / "ocr-snapshot.json").read_text())
+        assert "accessibility" in recorded["skipped"], recorded
+        print("PASS --targets all reports sources it could not use")
+    finally:
+        if (STATE / bare).exists():
+            command("stop", bare)
 
 
 if __name__ == "__main__":

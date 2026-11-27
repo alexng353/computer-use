@@ -10,6 +10,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+REQUEST_LIMIT = 64 * 1024
+# `annotate` (from --targets all) lists every merged badge as {ref, bounds},
+# about 45 bytes each; a crowded screen can pass 64 KiB, so it alone may be larger.
+ANNOTATE_LIMIT = 1024 * 1024
+
 
 def engine():
     from rapidocr import RapidOCR
@@ -253,8 +258,13 @@ def main():
                 connection.settimeout(60)
                 try:
                     with connection.makefile("rb") as incoming:
-                        # Merged `annotate` requests carry every target.
-                        message = json.loads(incoming.readline(4 * 1024 * 1024))
+                        line = incoming.readline(ANNOTATE_LIMIT)
+                    message = json.loads(line)
+                    if (
+                        len(line) > REQUEST_LIMIT
+                        and message.get("action") != "annotate"
+                    ):
+                        raise ValueError("request too large")
                     action = message.get("action")
                     if action == "ping":
                         result = {"ready": True}

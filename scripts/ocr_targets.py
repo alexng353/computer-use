@@ -163,33 +163,51 @@ def duplicate(a, b):
 
 
 def merge(groups):
-    """Keep each target unless an earlier-kept one covers the same control."""
+    """Keep each target unless an earlier source already covers that control.
+
+    Only earlier groups count: one source's nested controls (a tab and its
+    Close button, an entry and its reveal button) are distinct, and each
+    source already removes its own duplicates.
+    """
     kept = []
     for targets in groups:
+        earlier = list(kept)
         for target in targets:
-            if not any(duplicate(target["bounds"], k["bounds"]) for k in kept):
+            if not any(duplicate(target["bounds"], k["bounds"]) for k in earlier):
                 kept.append(target)
     return kept
 
 
-def available_sources(state):
-    ready = {
-        "accessibility": state.get("accessibility_bus")
-        == accessibility_targets.bus_address(state)
-        and accessibility_targets.services_alive(state),
-        # Required: ensure_worker explains a missing OCR runtime.
-        "text": True,
-        "icons": (icon_detector.RUNTIME / "bin/python").exists()
-        and icon_detector.valid_model(icon_detector.MODEL),
-    }
-    return [mode for mode in MERGE_ORDER if ready[mode]]
+def real_source_status(state, icon_runtime=None):
+    """Reasons the optional sources cannot run; OCR is required, never listed."""
+    reasons = {}
+    if state.get("accessibility_bus") != accessibility_targets.bus_address(state):
+        reasons["accessibility"] = "this session has no accessibility bus"
+    elif not accessibility_targets.services_alive(state):
+        reasons["accessibility"] = "the session's accessibility bus stopped"
+    runtime = icon_runtime or icon_detector.RUNTIME
+    if not (runtime / "bin/python").exists():
+        reasons["icons"] = "icon runtime not installed (run computer-use setup-icons)"
+    elif not icon_detector.valid_model(icon_detector.MODEL):
+        reasons["icons"] = (
+            "icon model missing or invalid (run computer-use setup-icons)"
+        )
+    return reasons
+
+
+source_status = real_source_status
+# Failures of an optional source that leave the others usable.
+SOURCE_ERRORS = (OSError, ValueError, RuntimeError, subprocess.SubprocessError)
 
 
 def recognize_all(state, start_service, source, output, prefix):
     """One badge set from every available source, de-duplicated by overlap."""
-    groups, used, skipped = [], [], {}
+    groups, used = [], []
+    skipped = source_status(state)
     with tempfile.TemporaryDirectory(dir=state["directory"]) as scratch:
-        for mode in available_sources(state):
+        for mode in MERGE_ORDER:
+            if mode in skipped:
+                continue
             try:
                 ensure_worker(state, start_service, target_mode=mode)
                 result = request(
@@ -202,12 +220,12 @@ def recognize_all(state, start_service, source, output, prefix):
                     },
                     target_mode=mode,
                 )
-            except RuntimeError as error:
-                # One source failing (no focused accessible window, say) must
-                # not hide what the others found.
+            except SOURCE_ERRORS as error:
+                # One source failing (no focused accessible window, a slow or
+                # dead worker) must not hide what the others found.
                 if mode == "text":
                     raise
-                skipped[mode] = str(error)
+                skipped[mode] = str(error) or type(error).__name__
                 continue
             used.append(mode)
             groups.append(
@@ -226,7 +244,10 @@ def recognize_all(state, start_service, source, output, prefix):
             "action": "annotate",
             "source": str(source),
             "output": str(output),
-            "targets": targets,
+            # Badges need only these; the full targets stay in the snapshot.
+            "targets": [
+                {"ref": target["ref"], "bounds": target["bounds"]} for target in targets
+            ],
         },
         target_mode="text",
     )

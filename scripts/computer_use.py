@@ -1252,6 +1252,15 @@ def perform(state, args, command):
             raw=args.raw,
             target_mode=args.targets,
         )
+        if args.targets == "all" and not args.raw:
+            snapshot = json.loads(
+                (Path(state["directory"]) / "ocr-snapshot.json").read_text()
+            )
+            for mode, reason in snapshot.get("skipped", {}).items():
+                print(
+                    f"computer-use: --targets all skipped {mode}: {reason}",
+                    file=sys.stderr,
+                )
         print(output)
     elif args.action == "query":
         snapshot, target = ocr_targets.query(state, args.reference)
