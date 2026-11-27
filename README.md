@@ -178,6 +178,7 @@ python checks/native_accessibility.py
 # Session REPL against zenity; also compares host focus, cursor and clipboard digest:
 python checks/native_repl.py
 python checks/native_repl_lifecycle.py
+python checks/native_repl_fixup.py
 python checks/repl_contracts.py
 ```
 

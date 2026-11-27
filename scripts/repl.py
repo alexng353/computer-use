@@ -70,16 +70,17 @@ def fresh(state):
 
 
 def discard(state):
-    """Stop the REPL and drop only its unit from the state on disk."""
+    """Stop the REPL, then drop only its unit from the state on disk."""
     import computer_use
 
-    current = fresh(state)
-    unit = unit_name(current)
+    unit = unit_name(state)
     subprocess.run(
         ["systemctl", "--user", "stop", unit], capture_output=True, check=False
     )
     if computer_use.active(unit):
         raise RuntimeError(f"Could not stop {unit}")
+    # Reload only now: the cell can record units while it is being stopped.
+    current = fresh(state)
     if unit in current["units"]:
         current["units"].remove(unit)
         computer_use.save(current)
@@ -166,7 +167,8 @@ def call(state, request, start_service, lock, stopping, timeout, reset=False):
     waits for it to end before returning, so the lock is never released while
     the cell can still drive the desktop.
     """
-    payload = json.dumps({"action": "run", **request}).encode() + b"\n"
+    payload = json.dumps({"action": "run", **request}, ensure_ascii=False).encode()
+    payload += b"\n"
     if len(payload) > MAX_MESSAGE:
         raise RuntimeError("Cell request too large (over 16 MiB)")
     state = ensure(state, start_service, reset=reset)
@@ -369,7 +371,8 @@ class Session:
         """OCR text boxes of a fresh capture (or an image path); refs are untouched."""
         self.targets.ensure_worker(self.state, self.cu.service, target_mode="text")
         with tempfile.TemporaryDirectory(dir=self.state["directory"]) as temporary:
-            source = Path(image) if image else Path(temporary) / "source.png"
+            # The OCR worker has its own working directory; send absolute paths.
+            source = Path(image).resolve() if image else Path(temporary) / "source.png"
             if not image:
                 self.capture(source)
             result = self.targets.request(
@@ -606,16 +609,19 @@ def execute(code, namespace):
 
 
 @contextlib.contextmanager
-def captured_output(directory, collected):
+def captured_output(path, collected):
     """Send fds 1 and 2, and sys.stdout/stderr, to one file for the cell.
 
-    Subprocesses that inherit the descriptors land in the reply in order.
+    Subprocesses that inherit the descriptors land in the reply in order. The
+    file is kept: a child that outlives its cell keeps writing there, not into
+    the reply.
     """
     sys.stdout.flush()
     sys.stderr.flush()
     streams = sys.stdout, sys.stderr
     saved = os.dup(1), os.dup(2)
-    with tempfile.TemporaryFile(dir=directory) as capture:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.open("w+b") as capture:
         os.dup2(capture.fileno(), 1)
         os.dup2(capture.fileno(), 2)
         sys.stdout = open(1, "w", buffering=1, errors="replace", closefd=False)
@@ -633,10 +639,23 @@ def captured_output(directory, collected):
             os.close(saved[1])
             capture.seek(0)
             output = capture.read(MAX_OUTPUT + 1)
-            text = output[:MAX_OUTPUT].decode(errors="replace")
-            if len(output) > MAX_OUTPUT:
-                text += "\n[output truncated at 8 MiB]\n"
-            collected.append(text)
+            collected.append(
+                fit_output(output[:MAX_OUTPUT].decode(errors="replace"), output)
+            )
+
+
+def fit_output(text, raw):
+    """Cut text so its JSON encoding stays within MAX_OUTPUT bytes."""
+    marker = "\n[output truncated to fit the reply]\n"
+    size = len(json.dumps(text, ensure_ascii=False).encode())
+    if size <= MAX_OUTPUT and len(raw) <= MAX_OUTPUT:
+        return text
+    keep = len(text)
+    while size > MAX_OUTPUT - len(marker) * 6:
+        # Escaping can grow a character up to six bytes; shrink until it fits.
+        keep = int(keep * (MAX_OUTPUT - len(marker) * 6) / size * 0.95)
+        size = len(json.dumps(text[:keep], ensure_ascii=False).encode())
+    return text[:keep] + marker
 
 
 def watch_client(connection, done):
@@ -661,21 +680,29 @@ def read_request(connection):
     """Return (message, lock fd or None) from one bounded request."""
     connection.settimeout(REQUEST_TIMEOUT)
     data, fds, _flags, _address = socket.recv_fds(connection, 1, 2)
+    for fd in fds:
+        # A child the cell starts (`cmd &`) must never inherit the session lock.
+        os.set_inheritable(fd, False)
     for extra in fds[1:]:
         os.close(extra)
     lock = fds[0] if fds else None
     try:
         buffer = bytearray(b"" if data == b"L" else data)
+        too_large = False
         while not buffer.endswith(b"\n"):
-            if len(buffer) > MAX_MESSAGE:
-                raise ValueError("request too large")
             chunk = connection.recv(65536)
             if not chunk:
                 raise ValueError("incomplete request")
-            buffer += chunk
+            if too_large or len(buffer) + len(chunk) > MAX_MESSAGE:
+                # Read the rest so the sender can still receive the refusal.
+                too_large = True
+                buffer = bytearray(chunk[-1:])
+            else:
+                buffer += chunk
+        if too_large:
+            raise ValueError("request too large")
         message = json.loads(buffer)
-        if not isinstance(message, dict):
-            raise ValueError("request must be a JSON object")
+        check_request(message)
         return message, lock
     except BaseException:
         if lock is not None:
@@ -683,8 +710,22 @@ def read_request(connection):
         raise
 
 
+def check_request(message):
+    if not isinstance(message, dict):
+        raise ValueError("request must be a JSON object")
+    if message.get("action") == "run":
+        if not isinstance(message.get("code"), str):
+            raise ValueError("code must be a string")
+        for field in ("image_dir", "cwd"):
+            if not isinstance(message.get(field), (str, type(None))):
+                raise ValueError(f"{field} must be a string or null")
+
+
 def run_cell(session, namespace, message, connection):
-    session.refresh(message.get("image_dir"))
+    try:
+        session.refresh(message.get("image_dir"))
+    except (OSError, ValueError, RuntimeError) as exc:
+        return {"error": f"Bad request: {exc}"}
     with contextlib.suppress(OSError, TypeError):
         os.chdir(message.get("cwd"))
     namespace["cdp"] = session.cdp
@@ -694,8 +735,14 @@ def run_cell(session, namespace, message, connection):
     done = threading.Event()
     threading.Thread(target=watch_client, args=(connection, done), daemon=True).start()
     collected, error, interrupted = [], None, False
+    session.counter += 1
+    output = (
+        Path(session.state["directory"])
+        / "spawn-logs"
+        / f"cell-{session.counter:04d}.out"
+    )
     try:
-        with captured_output(session.state["directory"], collected):
+        with captured_output(output, collected):
             RUNNING.set()
             try:
                 execute(message["code"], namespace)
@@ -748,7 +795,9 @@ def serve(name):
                     else:
                         reply = {"error": "Bad request: unknown action"}
                 try:
-                    connection.sendall(json.dumps(reply).encode() + b"\n")
+                    connection.sendall(
+                        json.dumps(reply, ensure_ascii=False).encode() + b"\n"
+                    )
                 except OSError:
                     pass
                 finally:

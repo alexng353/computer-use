@@ -99,13 +99,27 @@ def load(name):
 
 
 @contextmanager
-def interaction_lock(name):
+def interaction_lock(name, stuck=None, patience=10.0):
     # A name's lock must survive stop/recreate while old commands are waiting.
+    # `stuck` runs once if the lock is still held after `patience` seconds.
     global HELD_LOCK
     locks = ROOT / ".locks"
     locks.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (locks / (name + ".lock")).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        if stuck is not None:
+            deadline = time.monotonic() + patience
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        stuck()
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        break
+                    time.sleep(0.1)
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX)
         HELD_LOCK = lock
         try:
             yield lock
@@ -1034,7 +1048,25 @@ def main():
     if args.action == "stop":
         # Signal an unbounded input/exec before waiting for its interaction lock.
         stop_marker(state).touch()
-    with interaction_lock(args.name):
+
+    def release_repl():
+        # Commands and cells end within seconds of the stop marker; a lock held
+        # longer is held by something the REPL started, which dies with it.
+        subprocess.run(
+            ["systemctl", "--user", "stop", repl.unit_name(state)],
+            capture_output=True,
+            check=False,
+        )
+        print(
+            "computer-use: stop could not take the session lock; stopped the REPL "
+            "to release it (its state is lost)",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    with interaction_lock(
+        args.name, stuck=release_repl if args.action == "stop" else None
+    ):
         state = reload_session(state)
         if args.action == "stop":
             stop(state)
