@@ -18,10 +18,19 @@ Today's own `computer_*` tools are deferred. Find them with `tool_search` using
 Forge got its packages on 2026-11-26 from the Arch Linux Archive snapshot of
 2026-10-31, because its package database is that old and current mirrors 404:
 `pacman --config` with `Server = https://archive.archlinux.org/repos/2026/10/31/$repo/os/$arch`
-(no `-Sy`, no upgrade). Its `~/.local/bin/computer-use` links to
-`~/.agents/skills/computer-use/scripts/computer_use.py`. To roll Forge back:
-`sudo pacman -Rns xorg-server-xvfb xdotool xclip zenity xdg-dbus-proxy xorg-xauth xorg-xdpyinfo python-gobject python-pillow`
-and `rm ~/.local/bin/computer-use`.
+(no `-Sy`, no upgrade). That covers Xvfb, xdotool, xclip, zenity,
+xdg-dbus-proxy, xauth, xdpyinfo, python-gobject, python-pillow, tk and tcl
+(tkinter for the native checks), and `helium-browser-bin` 0.20.3.1-1 (installed
+with `pacman -U` against the same archive). Forge also has the OCR and icon
+runtimes (`setup-ocr`, `setup-icons`), and `~/.local/bin/computer-use` and
+`~/.local/bin/virtual-browser` link to
+`~/.agents/skills/computer-use/scripts/`. All native checks pass there. The
+browser's CDP port, when enabled, listens on 127.0.0.1 only.
+
+To roll Forge back:
+`sudo pacman -Rns xorg-server-xvfb xdotool xclip zenity xdg-dbus-proxy xorg-xauth xorg-xdpyinfo python-gobject python-pillow helium-browser-bin tk`,
+`rm ~/.local/bin/computer-use ~/.local/bin/virtual-browser`, and move
+`~/.local/share/computer-use/{ocr-venv,icons-venv,models}` to dated trash.
 
 ## First-use setup
 
@@ -253,12 +262,19 @@ computer-use prune --dry   # list what would move
 computer-use prune
 ```
 
-`prune` refuses any session with an active unit or a command holding its lock.
-It moves each dead session directory to
-`~/.local/state/tmp-trash-YYYYMMDD/computer-use-NAME` (never deleting it), runs
+`prune` takes each session's lock before reading it, and keeps any session with
+a unit that is not inactive or failed (including one still starting) or a
+command holding its lock. It moves each dead session directory to
+`~/.local/state/tmp-trash-YYYYMMDD/computer-use-NAME` (or `-2`, `-3`, … when that
+name is taken; never replacing or deleting anything), runs
 `systemctl --user reset-failed` on its units, and leaves external screenshot
-directories alone. It reports `computer-use-*` units that no remaining session
-owns as `orphan_units` and only clears the failed ones; stop an active orphan
-yourself after checking what it is.
+directories alone. A session it cannot move is listed under `kept` with the
+error, and the run continues.
+
+`orphan_units` lists `computer-use-*` units that no session owns, each with its
+`state`; inactive ones are left out, and units of a session that appeared
+during the run are skipped. The real run resets failed orphans and lists them
+in `reset_units`. Before stopping an orphan yourself, check what it is and that
+no new session folder now carries its name.
 
 The helper uses Python 3, uv for the isolated OCR runtime, Xvfb, xauth, xdpyinfo, xdg-dbus-proxy, and user systemd. Screenshot/input/clipboard actions additionally use ImageMagick, xdotool, and xclip; the browser convenience uses helium-browser. Source: [scripts/computer_use.py](scripts/computer_use.py).

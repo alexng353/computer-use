@@ -2,6 +2,7 @@
 """Run and control X11 desktop apps on a private virtual display."""
 
 import argparse
+import ctypes
 import datetime
 import fcntl
 import json
@@ -149,91 +150,155 @@ def loaded_session_units():
     return [line.split()[0] for line in listed.splitlines() if line.strip()]
 
 
-def prune(dry=False, root=None, trash_parent=None, day=None):
+def rename_noreplace(source, destination):
+    """rename(2) that fails with FileExistsError instead of replacing anything."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    at_fdcwd, rename_noreplace_flag = -100, 1
+    if libc.renameat2(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        rename_noreplace_flag,
+    ):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(destination))
+
+
+def move_to_trash(directory, trash, name):
+    trash.mkdir(mode=0o700, parents=True, exist_ok=True)
+    suffix = 1
+    while True:
+        destination = trash / (
+            f"computer-use-{name}" + (f"-{suffix}" if suffix > 1 else "")
+        )
+        # Claiming the slot and moving are one step, so a concurrent prune or
+        # an existing entry (even a broken symlink) is never replaced or nested.
+        try:
+            rename_noreplace(directory, destination)
+            return destination
+        except FileExistsError:
+            suffix += 1
+
+
+def reset_failed(unit):
+    subprocess.run(
+        ["systemctl", "--user", "reset-failed", unit],
+        capture_output=True,
+        check=False,
+    )
+
+
+def recorded_units(state):
+    return list(
+        dict.fromkeys(
+            unit
+            for unit in [
+                *state["units"],
+                state.get("display_unit"),
+                state.get("bus_unit"),
+            ]
+            if unit
+        )
+    )
+
+
+def prune_session(directory, locks, trash, dry, owners):
+    """Judge one session under its lock; return (outcome, detail)."""
+    name = directory.name
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (locks / (name + ".lock")).open("a") as lock:
+        # `start` saves state before its units run; its lock marks it busy.
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "kept", "busy: a command holds its lock"
+        # Read under the lock: a stop + start can replace the session up to here.
+        try:
+            state = json.loads((directory / "state.json").read_text())
+            units = recorded_units(state)
+            if "prefix" not in state:
+                return "kept", "no readable state.json"
+            if Path(state["directory"]).resolve() != directory.resolve():
+                return "kept", "state.json names another directory"
+        except FileNotFoundError:
+            if not directory.exists():
+                return "gone", None
+            return "kept", "no readable state.json"
+        except (OSError, ValueError, KeyError, TypeError):
+            return "kept", "no readable state.json"
+        owners[name] = set(units)
+        live = [
+            unit for unit in units if unit_state(unit) not in ("inactive", "failed")
+        ]
+        if live:
+            return "kept", "active units: " + ", ".join(live)
+        if dry:
+            return "prune", None
+        destination = move_to_trash(directory, trash, name)
+        del owners[name]
+        for unit in units:
+            reset_failed(unit)
+        return "pruned", {"trash": str(destination), "units": units}
+
+
+def prune(dry=False, root=None, trash_parent=None, day=None, list_units=None):
     """Move sessions whose units are all inactive into dated trash; never delete."""
     root = root or ROOT
     trash = (trash_parent or TRASH_PARENT) / (
         "tmp-trash-" + (day or datetime.date.today()).strftime("%Y%m%d")
     )
-    locks = root / ".locks"
     candidates, pruned, kept = [], [], []
-    owners = {}  # Remaining sessions: name -> (unit prefix, recorded units).
+    owners = {}  # Remaining sessions: name -> recorded units.
     directories = (
         sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
         if root.is_dir()
         else []
     )
     for directory in directories:
-        name = directory.name
         try:
-            state = json.loads((directory / "state.json").read_text())
-            units = list(
-                dict.fromkeys(
-                    unit
-                    for unit in [
-                        *state["units"],
-                        state.get("display_unit"),
-                        state.get("bus_unit"),
-                    ]
-                    if unit
-                )
+            outcome, detail = prune_session(
+                directory, root / ".locks", trash, dry, owners
             )
-            owners[name] = (state["prefix"], set(units))
-        except (OSError, ValueError, KeyError, TypeError):
-            kept.append({"name": name, "reason": "no readable state.json"})
+        except OSError as error:
+            # One bad entry is reported; the rest of the run continues.
+            outcome, detail = "kept", f"error: {error}"
+        if outcome == "kept":
+            kept.append({"name": directory.name, "reason": detail})
+        elif outcome == "prune":
+            candidates.append(directory.name)
+        elif outcome == "pruned":
+            pruned.append({"name": directory.name, **detail})
+    result = {"kept": kept}
+    try:
+        listed = (list_units or loaded_session_units)()
+    except (OSError, subprocess.SubprocessError) as error:
+        listed = None
+        result["orphan_error"] = str(error)
+    orphans, reset = [], []
+    for unit in listed or []:
+        if any(unit in recorded for recorded in owners.values()):
             continue
-        locks.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with (locks / (name + ".lock")).open("a") as lock:
-            # `start` saves state before its units run; its lock marks it busy.
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                kept.append({"name": name, "reason": "busy: a command holds its lock"})
-                continue
-            live = [
-                unit for unit in units if unit_state(unit) not in ("inactive", "failed")
-            ]
-            if live:
-                kept.append(
-                    {"name": name, "reason": "active units: " + ", ".join(live)}
-                )
-                continue
-            if dry:
-                candidates.append(name)
-                continue
-            trash.mkdir(mode=0o700, parents=True, exist_ok=True)
-            destination = trash / ("computer-use-" + name)
-            suffix = 1
-            while destination.exists():
-                suffix += 1
-                destination = trash / f"computer-use-{name}-{suffix}"
-            # A rename keeps the session's files intact; nothing is removed.
-            shutil.move(directory, destination)
-            for unit in units:
-                subprocess.run(
-                    ["systemctl", "--user", "reset-failed", unit],
-                    capture_output=True,
-                    check=False,
-                )
-            del owners[name]
-            pruned.append({"name": name, "trash": str(destination), "units": units})
-    orphans = []
-    for unit in loaded_session_units():
+        # Units are named computer-use-<folder>-...; this covers unrecorded units
+        # of remaining sessions and sessions that started during this run.
         if any(
-            unit.startswith(prefix + "-") or unit in recorded
-            for prefix, recorded in owners.values()
+            unit.startswith(f"computer-use-{path.name}-")
+            for path in (root.iterdir() if root.is_dir() else [])
+            if not path.name.startswith(".")
         ):
             continue
-        if not dry and unit_state(unit) == "failed":
-            subprocess.run(
-                ["systemctl", "--user", "reset-failed", unit],
-                capture_output=True,
-                check=False,
-            )
+        current = unit_state(unit)
+        if current == "inactive":
             continue
-        orphans.append(unit)
-    result = {"kept": kept, "orphan_units": orphans}
-    return {"prune": candidates, **result} if dry else {"pruned": pruned, **result}
+        if current == "failed" and not dry:
+            reset_failed(unit)
+            reset.append(unit)
+            continue
+        orphans.append({"unit": unit, "state": current})
+    result["orphan_units"] = None if listed is None else orphans
+    if dry:
+        return {"prune": candidates, **result}
+    return {"pruned": pruned, **result, "reset_units": reset}
 
 
 def stop_marker(state):
