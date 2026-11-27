@@ -21,6 +21,7 @@ from pathlib import Path
 
 import ocr_targets
 import accessibility_targets
+import repl
 
 ROOT = Path.home() / ".local/state/computer-use"
 
@@ -185,6 +186,71 @@ def check_session(state):
     for unit in [state["display_unit"], state["bus_unit"]]:
         if not active(unit):
             raise RuntimeError(f"{unit} is inactive; stop and recreate this session")
+
+
+def capture(env, output):
+    require("magick")
+    run("magick", "import", "-window", "root", str(output), env=env)
+
+
+def list_windows(env):
+    require("xdotool")
+    result = subprocess.run(
+        ["xdotool", "search", "--onlyvisible", "--name", "."],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode not in [0, 1]:
+        raise RuntimeError(result.stderr)
+    windows = []
+    for window in result.stdout.splitlines():
+        title = subprocess.run(
+            ["xdotool", "getwindowname", window],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if title.returncode == 0:
+            windows.append({"id": int(window), "title": title.stdout.rstrip("\n")})
+    return windows
+
+
+def get_clipboard(env):
+    require("xclip")
+    return run("xclip", "-selection", "clipboard", "-out", env=env, timeout=5).stdout
+
+
+def set_clipboard(state, text, env):
+    # A session-owned xclip holds the selection inside this display only.
+    require("xclip")
+    clipboard = Path(state["directory"]) / "clipboard.txt"
+    clipboard.write_text(text)
+    unit = state["prefix"] + "-clipboard.service"
+    if unit in state["units"]:
+        run("systemctl", "--user", "stop", unit)
+        state["units"].remove(unit)
+    service(
+        state,
+        unit,
+        ["xclip", "-selection", "clipboard", "-in", "-quiet", str(clipboard)],
+    )
+    poll(
+        lambda: (
+            subprocess.run(
+                ["xclip", "-selection", "clipboard", "-out"],
+                env=env,
+                capture_output=True,
+                timeout=1,
+                check=False,
+            ).returncode
+            == 0
+        ),
+        "Clipboard owner did not become ready",
+        seconds=5,
+    )
 
 
 def service(state, unit, command, isolated=True):
@@ -524,15 +590,7 @@ def status(state):
 
 
 def capture_image(state, output):
-    require("magick")
-    run(
-        "magick",
-        "import",
-        "-window",
-        "root",
-        str(output),
-        env=dict(os.environ, **environment(state)),
-    )
+    capture(dict(os.environ, **environment(state)), output)
 
 
 def automatic_screenshot(state, action):
@@ -631,6 +689,7 @@ def parser():
         "query",
         "windows",
         "clipboard",
+        "repl",
     ]:
         sub = commands.add_parser(action)
         sub.add_argument("name", type=identifier)
@@ -685,6 +744,26 @@ def parser():
             )
         elif action == "clipboard":
             sub.add_argument("operation", choices=["get", "set"])
+        elif action == "repl":
+            sub.add_argument(
+                "--code", help="Python cell to run (default: read it from stdin)"
+            )
+            sub.add_argument(
+                "--timeout",
+                type=float,
+                default=300,
+                help="Interrupt the cell after this many seconds (default: 300)",
+            )
+            sub.add_argument(
+                "--output-dir",
+                type=Path,
+                help="Directory for this cell's images (default: the session directory)",
+            )
+            sub.add_argument(
+                "--reset",
+                action="store_true",
+                help="Discard the REPL's state before running the cell",
+            )
     return cli
 
 
@@ -813,8 +892,8 @@ def perform(state, args, command):
         accessibility_targets.enable(state, service, save)
     env = dict(os.environ, **environment(state))
 
-    def capture(output):
-        capture_image(state, output)
+    def capture_screen(output):
+        capture(env, output)
 
     if args.action in ["launch", "browser", "exec", "input"] or (
         args.action == "clipboard" and args.operation == "set"
@@ -834,7 +913,12 @@ def perform(state, args, command):
         output = args.output.expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         ocr_targets.screenshot(
-            state, output, capture, service, raw=args.raw, target_mode=args.targets
+            state,
+            output,
+            capture_screen,
+            service,
+            raw=args.raw,
+            target_mode=args.targets,
         )
         print(output)
     elif args.action == "query":
@@ -870,64 +954,35 @@ def perform(state, args, command):
                 env=env,
             )
 
-        ocr_targets.click(state, args.reference, capture, native_click, service)
+        ocr_targets.click(state, args.reference, capture_screen, native_click, service)
     elif args.action == "windows":
-        require("xdotool")
-        result = subprocess.run(
-            ["xdotool", "search", "--onlyvisible", "--name", "."],
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode not in [0, 1]:
-            raise RuntimeError(result.stderr)
-        windows = []
-        for window in result.stdout.splitlines():
-            title = subprocess.run(
-                ["xdotool", "getwindowname", window],
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if title.returncode == 0:
-                windows.append({"id": int(window), "title": title.stdout.rstrip("\n")})
-        print(json.dumps(windows, indent=2))
+        print(json.dumps(list_windows(env), indent=2))
     elif args.action == "clipboard":
-        require("xclip")
         if args.operation == "get":
-            sys.stdout.write(
-                run(
-                    "xclip", "-selection", "clipboard", "-out", env=env, timeout=5
-                ).stdout
-            )
+            sys.stdout.write(get_clipboard(env))
         else:
-            clipboard = Path(state["directory"]) / "clipboard.txt"
-            clipboard.write_text(sys.stdin.read())
-            unit = state["prefix"] + "-clipboard.service"
-            if unit in state["units"]:
-                run("systemctl", "--user", "stop", unit)
-                state["units"].remove(unit)
-            service(
-                state,
-                unit,
-                ["xclip", "-selection", "clipboard", "-in", "-quiet", str(clipboard)],
-            )
-            poll(
-                lambda: (
-                    subprocess.run(
-                        ["xclip", "-selection", "clipboard", "-out"],
-                        env=env,
-                        capture_output=True,
-                        timeout=1,
-                        check=False,
-                    ).returncode
-                    == 0
-                ),
-                "Clipboard owner did not become ready",
-                seconds=5,
-            )
+            set_clipboard(state, sys.stdin.read(), env)
+    elif args.action == "repl":
+        code = args.code if args.code is not None else sys.stdin.read()
+        # Input helpers inside the cell retire references themselves, so a cell
+        # may still click a reference from the previous CLI screenshot.
+        if args.reset:
+            repl.discard(state, save)
+        output_dir = args.output_dir.expanduser().resolve() if args.output_dir else None
+        reply = repl.call(
+            state,
+            {"code": code, "image_dir": str(output_dir) if output_dir else None},
+            service,
+            save,
+            lambda: stop_marker(state).exists(),
+            args.timeout,
+        )
+        sys.stdout.write(reply.get("stdout", ""))
+        for image in reply.get("images", []):
+            print("[image] " + image)
+        if reply.get("error"):
+            sys.stderr.write(reply["error"])
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -436,17 +436,80 @@ def native_reader(directory):
     return detect
 
 
+def tree_text(env, state, max_nodes=3000):
+    """Indented AT-SPI tree of every app on the session's private bus."""
+    result = subprocess.run(
+        [str(PYTHON), __file__, "--tree", state["directory"], str(int(max_nodes))],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "Accessibility tree read failed")
+    return result.stdout
+
+
+def native_tree(directory, max_nodes):
+    if os.environ.get("AT_SPI_BUS_ADDRESS") != bus_address({"directory": directory}):
+        raise RuntimeError("Accessibility reader requires its session's private bus")
+    import gi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    Atspi.set_timeout(750, 750)
+    deadline = time.monotonic() + 10
+    lines = []
+    stack = [(Atspi.get_desktop(0), -1)]
+    while stack:
+        if len(lines) >= max_nodes or time.monotonic() > deadline:
+            lines.append(f"... truncated after {len(lines)} nodes")
+            break
+        node, depth = stack.pop()
+        if depth >= 0:
+            role = node.get_role_name()
+            name = node.get_name() or ""
+            text = f"{'  ' * depth}{role}" + (f" {name!r}" if name else "")
+            if node.is_component():
+                rect = node.get_component_iface().get_extents(Atspi.CoordType.SCREEN)
+                if rect.width > 0 and rect.height > 0:
+                    text += f" [{rect.x},{rect.y},{rect.x + rect.width},{rect.y + rect.height}]"
+            states = node.get_state_set()
+            flags = [
+                label
+                for label, kind, wanted in (
+                    ("focused", Atspi.StateType.FOCUSED, True),
+                    ("disabled", Atspi.StateType.ENABLED, False),
+                    ("hidden", Atspi.StateType.SHOWING, False),
+                    ("checked", Atspi.StateType.CHECKED, True),
+                )
+                if states.contains(kind) == wanted
+            ]
+            if flags:
+                text += " (" + ", ".join(flags) + ")"
+            lines.append(text)
+        count = node.get_child_count()
+        children = [node.get_child_at_index(i) for i in range(max(0, count))]
+        stack.extend((child, depth + 1) for child in reversed(children) if child)
+    return "\n".join(lines) + "\n"
+
+
 if __name__ == "__main__":
     from types import SimpleNamespace
 
     try:
-        print(
-            json.dumps(
-                native_reader(sys.argv[1])(
-                    SimpleNamespace(size=tuple(map(int, sys.argv[2:4])))
+        if sys.argv[1] == "--tree":
+            sys.stdout.write(native_tree(sys.argv[2], int(sys.argv[3])))
+        else:
+            print(
+                json.dumps(
+                    native_reader(sys.argv[1])(
+                        SimpleNamespace(size=tuple(map(int, sys.argv[2:4])))
+                    )
                 )
             )
-        )
     except Exception as error:  # noqa: BLE001 - Report native reader failures to its owner.
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from None

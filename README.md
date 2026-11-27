@@ -153,6 +153,10 @@ Inspect the image before selecting a reference. Chromium's native hit test can r
 
 Queries include `kind: "accessibility"`, the accessible `role`, and the accessible name in `text` (possibly empty); `confidence` is null. They retain the same source coordinates, a–g references and mode-switch invalidation. Clicking rechecks the focused window, node path, role, name, visible bounds, hit testing and target pixels before native input. Queries remain cached reads. A change or verification error retires references and requires a fresh capture; identical-looking and identically-described replacement controls remain indistinguishable.
 
+## Session REPL
+
+`computer-use repl NAME` runs one Python cell (stdin or `--code`) in a long-lived interpreter owned by the session as its own user service (`<prefix>-repl.service`, socket `repl.sock` in the session directory). Helpers reuse the CLI's paths: reference clicks go through the same verification, input retires references, `type` pastes multiline text through the session-owned clipboard, and `screenshot` advances the same a–g sequence. The command holds the session's interaction lock for the whole cell, honours `stop` while waiting, and on `--timeout` sends SIGINT to interrupt the cell while keeping state (if the cell ignores it, the REPL is restarted and its state is lost). Processes started with `spawn` belong to the REPL service and end with it. See SKILL.md for the helper list.
+
 ## Development
 
 ```bash
@@ -168,6 +172,8 @@ python checks/native_ocr.py
 python checks/native_icons.py
 # After setup-accessibility; requires Helium, tkinter and setup-ocr for assertions:
 python checks/native_accessibility.py
+# Session REPL against zenity; also compares host focus, cursor and clipboard digest:
+python checks/native_repl.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.

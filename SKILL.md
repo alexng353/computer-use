@@ -109,6 +109,47 @@ computer-use input invoice-task -- windowfocus WINDOW_ID
 
 `input` forwards its arguments to xdotool with the correct DISPLAY and Xauthority. Do not run bare xdotool, host clipboard commands, or Hyprland focus/cursor commands for this desktop.
 
+## Batch steps in the session REPL
+
+For anything longer than one or two actions, prefer `repl`: one call runs a whole
+Python cell inside the desktop, so loops, waits and multi-field forms cost one
+turn instead of one per click. The REPL keeps its variables between calls until
+`computer-use stop NAME` (or `repl NAME --reset`).
+
+```bash
+computer-use repl invoice-task <<'PY'
+p = spawn("zenity", "--entry", "--title=Invoice note")
+focus(wait_window("Invoice note"))
+type("Updated note")
+key("Return")
+print(p.communicate(timeout=10)[0])
+display(screenshot())
+PY
+```
+
+The cell comes from stdin or `--code`. The command prints the cell's output, the
+value of a trailing expression, and one `[image] PATH` line per image the cell
+passed to `display()`; view those paths as you would a screenshot. A failing cell
+prints its traceback, exits 1 and keeps the REPL's state. `--timeout SECONDS`
+(default 300) interrupts a stuck cell without losing state. Images go to the
+session directory unless `--output-dir` is given; save anything you need to keep.
+A cell returns only the images it displays: `--screenshot-directory` does not add
+an automatic capture after `repl`, so end a cell with `display(screenshot())` when
+you need to see the result.
+
+Preloaded helpers:
+
+- `screenshot(targets="accessibility" | "text" | "icons" | None)` returns the snapshot (`image`, `targets` with refs), like `query`. `find(snapshot, text=, role=, exact=True)` returns the one matching target or raises.
+- `click("@a3" | target)` uses the same verification as `click`; `click(x, y, button=1, double=False)` clicks coordinates. `type(text)` types ASCII and pastes multiline or Unicode text through the session clipboard; `key("ctrl+s", ...)`, `scroll(dy, dx, x=, y=)`, `drag(x0, y0, x1, y1)`, `clipboard(text=None)`, `xdotool(...)`.
+- `zoom((x0, y0, x1, y1))` returns a full-resolution crop (upscaled when small); `wait_stable(timeout=5)` waits until the screen stops changing; `a11y()` returns the AT-SPI tree as text; `ocr(image=None)` returns text boxes without replacing the current references.
+- `windows()`, `wait_window(title)`, `focus(window)`, `spawn(*cmd)` (a `Popen` with text pipes, ended with the REPL), `launch(app_id, *cmd)` (a session service, like `launch`), and `cdp` (the browser's DevTools port with `cdp.run(*agent_browser_args)`, or `None`).
+
+References follow the CLI rules: every input helper retires them, and a click on a
+stale or changed reference raises. The REPL runs as Alex inside the session's
+environment, like `exec`; it adds no isolation boundary. Some apps (GTK4 zenity
+without a window manager, for example) report broken accessibility bounds, so
+the accessibility overlay can come back empty; use `targets="text"` there.
+
 For multiline or Unicode text, use the virtual clipboard and paste:
 
 ```bash
