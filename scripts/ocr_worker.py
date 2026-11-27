@@ -258,7 +258,14 @@ def main():
                 connection.settimeout(60)
                 try:
                     with connection.makefile("rb") as incoming:
-                        line = incoming.readline(ANNOTATE_LIMIT)
+                        line = incoming.readline(ANNOTATE_LIMIT + 1)
+                        if not line.endswith(b"\n"):
+                            # Never act on a prefix: drain the rest so the
+                            # client can read the refusal.
+                            chunk = line
+                            while chunk and not chunk.endswith(b"\n"):
+                                chunk = incoming.readline(ANNOTATE_LIMIT)
+                            raise ValueError("request too large")
                     message = json.loads(line)
                     if (
                         len(line) > REQUEST_LIMIT

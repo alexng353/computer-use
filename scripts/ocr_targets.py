@@ -22,6 +22,9 @@ MERGE_ORDER = ("accessibility", "text", "icons")
 # when one sits almost wholly inside the other (OCR text inside its button).
 DUPLICATE_IOU = 0.5
 DUPLICATE_CONTAINMENT = 0.8
+# Containment only merges a box that covers this much of its container: a
+# label filling its button is the same control, a small icon in a card is not.
+CONTAINMENT_MIN_SHARE = 0.2
 
 
 def invalidate(state):
@@ -156,9 +159,10 @@ def duplicate(a, b):
         return False
     shared = width * height
     union = area(a) + area(b) - shared
-    return (
-        shared / union >= DUPLICATE_IOU
-        or shared / min(area(a), area(b)) >= DUPLICATE_CONTAINMENT
+    smaller, larger = sorted((area(a), area(b)))
+    return shared / union >= DUPLICATE_IOU or (
+        shared / smaller >= DUPLICATE_CONTAINMENT
+        and smaller >= CONTAINMENT_MIN_SHARE * larger
     )
 
 
@@ -180,18 +184,32 @@ def merge(groups):
 
 def real_source_status(state, icon_runtime=None):
     """Reasons the optional sources cannot run; OCR is required, never listed."""
+
+    def accessibility():
+        if state.get("accessibility_bus") != accessibility_targets.bus_address(state):
+            return "this session has no accessibility bus"
+        if not accessibility_targets.services_alive(state):
+            return "the session's accessibility bus stopped"
+        return None
+
+    def icons():
+        runtime = icon_runtime or icon_detector.RUNTIME
+        if not (runtime / "bin/python").exists():
+            return "icon runtime not installed (run computer-use setup-icons)"
+        if not icon_detector.valid_model(icon_detector.MODEL):
+            return "icon model missing or invalid (run computer-use setup-icons)"
+        return None
+
     reasons = {}
-    if state.get("accessibility_bus") != accessibility_targets.bus_address(state):
-        reasons["accessibility"] = "this session has no accessibility bus"
-    elif not accessibility_targets.services_alive(state):
-        reasons["accessibility"] = "the session's accessibility bus stopped"
-    runtime = icon_runtime or icon_detector.RUNTIME
-    if not (runtime / "bin/python").exists():
-        reasons["icons"] = "icon runtime not installed (run computer-use setup-icons)"
-    elif not icon_detector.valid_model(icon_detector.MODEL):
-        reasons["icons"] = (
-            "icon model missing or invalid (run computer-use setup-icons)"
-        )
+    for mode, check in (("accessibility", accessibility), ("icons", icons)):
+        # Probing a source (reading the model, asking the bus) can fail too;
+        # that skips the source, never the capture.
+        try:
+            reason = check()
+        except SOURCE_ERRORS as error:
+            reason = f"availability check failed: {error}"
+        if reason:
+            reasons[mode] = reason
     return reasons
 
 

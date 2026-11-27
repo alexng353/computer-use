@@ -179,6 +179,31 @@ def main(directory):
             reply = json.loads(raw.makefile("rb").readline())
         assert "too large" in reply.get("error", ""), reply
         print("PASS the OCR worker refuses large requests other than annotate")
+
+        # An annotate line longer than the limit is refused, never run on a prefix.
+        rendered = directory / "prefix-annotate.png"
+        request = json.dumps(
+            {
+                "action": "annotate",
+                "source": str(STATE / name / "ocr-screen.png"),
+                "output": str(rendered),
+                "targets": [],
+            }
+        ).encode()
+        frame = request.ljust(1024 * 1024) + b"trailing\n"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+            raw.settimeout(30)
+            raw.connect(str(STATE / name / "ocr.sock"))
+            raw.sendall(frame)
+            reply = json.loads(raw.makefile("rb").readline())
+        assert "too large" in reply.get("error", ""), reply
+        assert not rendered.exists(), "annotate ran on a prefix"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+            raw.settimeout(30)
+            raw.connect(str(STATE / name / "ocr.sock"))
+            raw.sendall(b'{"action": "ping"}\n')
+            assert json.loads(raw.makefile("rb").readline()) == {"ready": True}
+        print("PASS an oversized annotate line is refused and the worker stays up")
     finally:
         if (STATE / name).exists():
             command("stop", name)

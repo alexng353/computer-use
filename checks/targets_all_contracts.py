@@ -17,7 +17,7 @@ def target(kind, bounds):
 
 def main():
     button = target("accessibility", [100, 100, 220, 144])
-    label = target("text", [140, 110, 180, 132])  # the button's own text
+    label = target("text", [110, 104, 210, 140])  # the button's text, filling it
     icon = target("visual", [96, 98, 150, 146])  # overlaps the button, IoU < 0.5
     neighbour = target("text", [320, 100, 420, 144])  # further along, no overlap
     edge = target("text", [200, 100, 300, 144])  # 20 px shared: separate controls
@@ -43,7 +43,7 @@ def main():
     assert ocr_targets.merge([[tab, close]]) == [tab, close]
     entry = target("accessibility", [40, 200, 400, 240])
     reveal = target("accessibility", [360, 204, 396, 236])
-    card_text = target("text", [60, 210, 200, 230])
+    card_text = target("text", [50, 204, 330, 236])  # the entry's own text
     merged = ocr_targets.merge([[entry, reveal], [card_text]])
     assert merged == [entry, reveal], merged
     # IoU alone (0.5) drops a cross-source box that is only 67% contained.
@@ -51,6 +51,12 @@ def main():
     assert ocr_targets.merge([[first], [second]]) == [first]
     assert ocr_targets.merge([[first, second]]) == [first, second]
     print("PASS nested controls of one source stay; cross-source IoU still drops")
+
+    # A small control inside a large one of another source keeps its badge.
+    card = target("accessibility", [0, 0, 400, 300])
+    small_icon = target("visual", [360, 10, 390, 40])
+    assert ocr_targets.merge([[card], [small_icon]]) == [card, small_icon]
+    print("PASS containment drops only boxes covering 20% of their container")
 
     check_sources()
 
@@ -83,8 +89,9 @@ def check_sources():
             ]
         }
 
-    def run(state):
+    def run(state, ensure=None):
         sent.clear()
+        ocr_targets.ensure_worker = ensure or (lambda *_args, **_kwargs: None)
         return ocr_targets.recognize_all(
             state, None, Path("source.png"), Path("out.png"), "a"
         )
@@ -109,6 +116,28 @@ def check_sources():
                 raise AssertionError("an OCR failure must be fatal")
             print("PASS optional sources that fail are skipped; OCR stays fatal")
 
+            def failing_ensure(state, start_service, target_mode="text"):
+                if target_mode == "accessibility":
+                    raise subprocess.CalledProcessError(1, ["systemd-run"])
+                if target_mode == "icons":
+                    raise RuntimeError("icons worker did not start")
+
+            result = run({**base, "fail": {}}, ensure=failing_ensure)
+            assert result["sources"] == ["text"], result
+            assert set(result["skipped"]) == {"accessibility", "icons"}, result
+
+            def text_fails(state, start_service, target_mode="text"):
+                if target_mode == "text":
+                    raise RuntimeError("OCR runtime missing")
+
+            try:
+                run({**base, "fail": {}}, ensure=text_fails)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("a failing OCR worker start must be fatal")
+            print("PASS a worker that fails to start skips its source; OCR is fatal")
+
             result = run(
                 {**base, "fail": {}, "unavailable": {"icons": "icon runtime missing"}}
             )
@@ -127,6 +156,48 @@ def check_sources():
     assert "accessibility" in reasons["accessibility"], reasons
     assert "setup-icons" in reasons["icons"], reasons
     print("PASS missing accessibility and icon runtimes have readable reasons")
+    check_unreadable_model()
+
+
+def check_unreadable_model():
+    """An availability check that raises skips its source (REAL source_status)."""
+    real = (
+        ocr_targets.request,
+        ocr_targets.ensure_worker,
+        icon_detector.RUNTIME,
+        icon_detector.MODEL,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        runtime = Path(directory) / "icons-venv"
+        (runtime / "bin").mkdir(parents=True)
+        (runtime / "bin/python").touch()
+        model = Path(directory) / "model.pt"
+        model.write_bytes(b"weights")
+        model.chmod(0)
+        icon_detector.RUNTIME, icon_detector.MODEL = runtime, model
+        ocr_targets.ensure_worker = lambda *_args, **_kwargs: None
+
+        def fake_request(state, message, timeout=60, target_mode="text"):
+            if message["action"] == "annotate":
+                return {"size": [10, 10], "image_size": [10, 10]}
+            return {"targets": []}
+
+        ocr_targets.request = fake_request
+        try:
+            result = ocr_targets.recognize_all(
+                {"directory": directory}, None, Path("s.png"), Path("o.png"), "a"
+            )
+        finally:
+            model.chmod(0o600)
+            (
+                ocr_targets.request,
+                ocr_targets.ensure_worker,
+                icon_detector.RUNTIME,
+                icon_detector.MODEL,
+            ) = real
+    assert result["sources"] == ["text"], result
+    assert "availability check failed" in result["skipped"]["icons"], result
+    print("PASS an unreadable icon model skips icons instead of failing the capture")
 
 
 if __name__ == "__main__":
