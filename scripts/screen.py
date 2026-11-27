@@ -2,6 +2,8 @@
 
 import hashlib
 import math
+import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -36,15 +38,76 @@ def settle_milliseconds(value):
     return number
 
 
-def frame_digest(env):
-    raw = subprocess.run(
-        ["magick", "import", "-window", "root", "-depth", "8", "rgb:-"],
+# Only the end of magick's stderr is relayed; its last lines say what failed.
+STDERR_TAIL = 4096
+
+
+def magick(args, env, timeout=10.0, cancelled=None, label="magick"):
+    """Run magick, bounded by timeout and ended at once when cancelled().
+
+    The process runs in its own group, so a stop or timeout also reaps any
+    helper it started. Returns stdout bytes; failures carry magick's stderr.
+    """
+    with subprocess.Popen(
+        ["magick", *args],
         env=env,
-        capture_output=True,
-        check=True,
-        timeout=10,
-    ).stdout
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
+        deadline = time.monotonic() + timeout
+        while True:
+            stopping = cancelled is not None and cancelled()
+            if stopping or time.monotonic() >= deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                if stopping:
+                    raise Cancelled("Capture cancelled because the session is stopping")
+                raise RuntimeError(f"{label} did not finish within {timeout:g} s")
+            try:
+                stdout, stderr = process.communicate(timeout=0.05)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    if process.returncode:
+        reason = stderr[-STDERR_TAIL:].decode(errors="replace").strip()
+        raise RuntimeError(
+            f"{label} failed ({process.returncode}): {reason or 'no error output'}"
+        )
+    return stdout
+
+
+def frame_digest(env, cancelled=None, timeout=10.0):
+    raw = magick(
+        ["import", "-window", "root", "-depth", "8", "rgb:-"],
+        env,
+        timeout=timeout,
+        cancelled=cancelled,
+        label="magick frame capture",
+    )
     return hashlib.sha256(raw).digest()
+
+
+def capture_to(env, output, cancelled=None, timeout=SETTLE_CAP):
+    """Capture the screen to output, or leave no file at all."""
+    output = Path(output)
+    partial = output.with_name(f".partial-{output.name}")
+    try:
+        magick(
+            ["import", "-window", "root", str(partial)],
+            env,
+            timeout=timeout,
+            cancelled=cancelled,
+            label="magick screen capture",
+        )
+        partial.replace(output)
+    finally:
+        partial.unlink(missing_ok=True)
+    return output
 
 
 def wait_stable(
@@ -58,19 +121,26 @@ def wait_stable(
     """
     if timeout < quiet:
         raise ValueError("timeout must be at least quiet, or it can never settle")
-    deadline = time.monotonic() + timeout
-    last = frame_digest(env)
-    since = time.monotonic()
-    while True:
+
+    def check():
         if cancelled is not None and cancelled():
             raise Cancelled("Settling cancelled because the session is stopping")
+
+    check()
+    # Each capture is bounded by the cap and ends at once on stop.
+    last = frame_digest(env, cancelled, timeout=timeout)
+    # Both clocks start after the first frame, so timeout == quiet can settle.
+    deadline = time.monotonic() + timeout
+    since = time.monotonic()
+    while True:
+        check()
         now = time.monotonic()
         if now - since >= quiet:
             return True
         if now >= deadline:
             return False
         time.sleep(interval)
-        current = frame_digest(env)
+        current = frame_digest(env, cancelled, timeout=timeout)
         if current != last:
             last, since = current, time.monotonic()
 
@@ -107,9 +177,8 @@ def zoom(env, box, output, scale=None, size=None):
         )
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
+    magick(
         [
-            "magick",
             "import",
             "-window",
             "root",
@@ -126,15 +195,7 @@ def zoom(env, box, output, scale=None, size=None):
             ),
             str(output),
         ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
+        env,
+        label="magick zoom",
     )
-    if result.returncode:
-        raise RuntimeError(
-            f"magick could not write the zoom ({result.returncode}): "
-            + (result.stderr.strip() or "no error output")
-        )
     return str(output)

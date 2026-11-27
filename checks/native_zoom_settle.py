@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from native_ocr import CLI, STATE, command, wait_until
+from native_repl_lifecycle import locked
 
 STATUS = "Ln 128, Col 47  UTF-8  LF  4821 ms"
 MODEL_LONG_EDGE = 1568
@@ -139,19 +140,75 @@ def wait_still(name):
     command("repl", name, "--code", "wait_stable(timeout=15, quiet=1)", timeout=60)
 
 
-def fake_magick(directory):
-    """A magick that fails frame digests and settled captures, nothing else."""
-    bin_dir = directory / "fake-bin"
+FAKES = {
+    # Fails frame digests and settled captures, nothing else.
+    "refuse": 'rgb:-|*settled-*) echo "fake magick refused" >&2; exit 42;;',
+    # Fails every capture.
+    "all": '*) echo "fake magick refused" >&2; exit 42;;',
+    # Blocks frame digests, as a hung X server would.
+    "hang-digest": "rgb:-) sleep 30; exit 42;;",
+    # Blocks only the repl's settled capture.
+    "hang-settled": "*settled-*) sleep 30; exit 42;;",
+    # Writes part of the settled image, then fails.
+    "partial": '*settled-*) printf partial > "$a"; exit 42;;',
+}
+
+
+def fake_magick(directory, mode="refuse"):
+    """PATH with a magick that misbehaves as FAKES[mode] says, else is real."""
+    bin_dir = directory / f"fake-{mode}"
     bin_dir.mkdir(exist_ok=True)
     script = bin_dir / "magick"
     script.write_text(
         "#!/bin/sh\n"
-        'for a in "$@"; do case "$a" in rgb:-|*settled-*) '
-        'echo "fake magick refused" >&2; exit 42;; esac; done\n'
+        f'for a in "$@"; do case "$a" in {FAKES[mode]} esac; done\n'
         f'exec {shutil.which("magick")} "$@"\n'
     )
     script.chmod(0o700)
     return dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
+def fakes_running(directory):
+    listed = subprocess.run(
+        ["pgrep", "-f", str(directory / "fake-")], capture_output=True, text=True
+    )
+    return listed.stdout.split()
+
+
+def stop_during(name, directory, args, env):
+    """Start a command, stop the session 1.5 s in; assert both end promptly."""
+    waiting = subprocess.Popen(
+        [sys.executable, str(CLI), *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    time.sleep(1.5)
+    started = time.monotonic()
+    command("stop", name, timeout=60)
+    stopped = time.monotonic() - started
+    _, stderr = waiting.communicate(timeout=30)
+    # The capture's own 5 s cap would end it about 3.5 s after stop; a real
+    # cancel ends it at once.
+    assert stopped < 2.5, (args, stopped)
+    assert waiting.returncode != 0 and "stopping" in stderr, (args, stderr)
+    assert not fakes_running(directory), fakes_running(directory)
+    assert not locked(name), "lock still held after stop"
+
+
+def check_hung_capture(name, directory):
+    """stop ends a settle whose frame capture hangs, and fails the command."""
+    directory.mkdir()
+    command("start", name, "--size", "640x480", "--no-accessibility")
+    env = fake_magick(directory, "hang-digest")
+    stop_during(
+        name,
+        directory,
+        ["input", name, "--settle=500", "--", "mousemove", "4", "4"],
+        env,
+    )
+    print("PASS stop ends a settle whose frame capture hangs", flush=True)
 
 
 def open_fixture(name, size, directory, shots=True):
@@ -235,7 +292,9 @@ def check_zoom(name, directory, keep):
     broken = command(
         "zoom", name, "0", "0", "10", "10", "--output", str(directory), ok=False
     )
-    assert "magick" in broken.stderr and len(broken.stderr) > 60, broken.stderr
+    # magick's own message names the path; the fallback text would not.
+    assert str(directory) in broken.stderr, broken.stderr
+    assert "no error output" not in broken.stderr, broken.stderr
     print("PASS zoom reads 9 px status text that the full shot misses", flush=True)
 
     # repl --settle without a screenshot directory returns a raw settled image,
@@ -254,6 +313,32 @@ def check_zoom(name, directory, keep):
     assert broken.returncode == 0 and broken.stdout == "ran\n", broken
     assert "completed" in broken.stderr and "repeat" in broken.stderr, broken.stderr
     print("PASS repl --settle: raw image on its own line; failures keep the status")
+
+    # A failed settled capture leaves no partial image behind.
+    kept = directory / "kept-images"
+    partial = cli(
+        "repl",
+        name,
+        "--settle=300",
+        "--output-dir",
+        str(kept),
+        "--code",
+        "print('ran')",
+        env=fake_magick(directory, "partial"),
+    )
+    assert partial.returncode == 0 and "completed" in partial.stderr, partial
+    leftovers = [p.name for p in kept.iterdir()] if kept.exists() else []
+    assert not leftovers, leftovers
+    print("PASS a failed settled capture leaves no partial file", flush=True)
+
+    # stop ends a repl --settle whose settled capture hangs; this ends the session.
+    stop_during(
+        name,
+        directory,
+        ["repl", name, "--settle=300", "--code", "print('ran')"],
+        fake_magick(directory, "hang-settled"),
+    )
+    print("PASS stop ends a settle whose settled capture hangs", flush=True)
 
 
 def check_settle(name, directory):
@@ -339,6 +424,31 @@ def check_settle(name, directory):
     assert last_path(broken.stdout).is_file(), broken.stdout
     print("PASS a failed settle warns, captures and keeps the exit code", flush=True)
 
+    # When the settle AND the automatic capture fail, the action's status stays.
+    env = fake_magick(directory, "all")
+    for code in (0, 3):
+        both = cli(
+            "exec",
+            name,
+            "--settle=100",
+            "--",
+            "sh",
+            "-c",
+            f"printf action-ran; exit {code}",
+            env=env,
+        )
+        assert both.returncode == code, (code, both)
+        assert both.stdout.startswith("action-ran"), both.stdout
+        assert "screenshot failed" in both.stderr and "repeat" in both.stderr, both
+    plain = cli("exec", name, "--", "true", env=env)
+    assert plain.returncode == 0 and "screenshot failed" in plain.stderr, plain
+    print("PASS failed observation keeps the action's exit status", flush=True)
+
+    # wait_stable(timeout == quiet) on a still screen settles.
+    edge = command("repl", name, "--code", "print(wait_stable(timeout=1, quiet=1))")
+    assert edge.stdout == "True\n", edge.stdout
+    print("PASS wait_stable settles when timeout equals quiet", flush=True)
+
     # Stop cancels a long settle instead of waiting for it.
     long_settle = ["input", name, "--settle=20000", "--", "mousemove", "3", "3"]
     waiting = subprocess.Popen(
@@ -365,10 +475,15 @@ def main(directory, keep=None):
     tag = secrets.token_hex(3)
     # RapidOCR misses large, sparse text on a mostly empty 2560x1600 frame, so
     # settling (which needs the buttons' OCR) runs on a normal-size screen.
-    names = {"zoom": f"check-zoom-{tag}", "settle": f"check-settle-{tag}"}
+    names = {
+        "zoom": f"check-zoom-{tag}",
+        "settle": f"check-settle-{tag}",
+        "hung": f"check-hung-{tag}",
+    }
     try:
         check_zoom(names["zoom"], directory / "zoom", keep)
         check_settle(names["settle"], directory / "settle")
+        check_hung_capture(names["hung"], directory / "hung")
     finally:
         for name in names.values():
             if (STATE / name).exists():
