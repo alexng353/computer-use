@@ -155,7 +155,9 @@ Queries include `kind: "accessibility"`, the accessible `role`, and the accessib
 
 ## Session REPL
 
-`computer-use repl NAME` runs one Python cell (stdin or `--code`) in a long-lived interpreter owned by the session as its own user service (`<prefix>-repl.service`, socket `repl.sock` in the session directory). Helpers reuse the CLI's paths: reference clicks go through the same verification, input retires references, `type` pastes multiline text through the session-owned clipboard, and `screenshot` advances the same a–g sequence. The command holds the session's interaction lock for the whole cell, honours `stop` while waiting, and on `--timeout` sends SIGINT to interrupt the cell while keeping state (if the cell ignores it, the REPL is restarted and its state is lost). Processes started with `spawn` belong to the REPL service and end with it. See SKILL.md for the helper list.
+`computer-use repl NAME` runs one Python cell (stdin or `--code`) in a long-lived interpreter owned by the session as its own user service (`<prefix>-repl.service`, socket `repl.sock` in the session directory). Helpers reuse the CLI's paths: reference clicks go through the same verification, input retires references, `type` pastes multiline text through the session-owned clipboard, and `screenshot` advances the same a–g sequence. Processes started with `spawn` belong to the REPL service and end with it.
+
+While a cell runs, the server is authoritative for `state.json` (it records units the cell launches), and every write the CLI makes afterwards reloads the file under the lock. The CLI passes its locked file to the server with the request (`SCM_RIGHTS`), so the interaction lock stays held until both the CLI and the cell are done, even if the CLI is killed. A timeout, `stop`, or SIGTERM/SIGINT/SIGHUP to the CLI interrupts the cell (SIGINT to the server, `KeyboardInterrupt` in the cell) and waits for it to end; the server also interrupts a cell whose client connection closes. A cell that ignores the interrupt for 5 s is ended by stopping the REPL service (from the CLI) or exiting it (from the server), and the loss is reported. `ensure` tells a busy REPL (accepts but does not answer) from a dead one and never replaces a busy one. See SKILL.md for the helper list.
 
 ## Development
 
@@ -174,6 +176,8 @@ python checks/native_icons.py
 python checks/native_accessibility.py
 # Session REPL against zenity; also compares host focus, cursor and clipboard digest:
 python checks/native_repl.py
+python checks/native_repl_lifecycle.py
+python checks/repl_contracts.py
 ```
 
 No GPU or cloud OCR runtime is required. The worker uses RapidOCR's detection/recognition boxes directly, clips them to the image, assigns labels in top-to-bottom/left-to-right order, and renders readable badges. Session input and screenshot publication are serialized with a persistent per-name file lock. `stop` requests cancellation before waiting for that lock, and waiting commands verify the session's unique identity after acquiring it. Blocked `input`/`exec` subprocess groups are terminated when the session stops. Lock files under the private `.locks` directory survive session deletion so queued commands cannot bypass a replacement session's lock.
